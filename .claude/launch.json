@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "backend/venv/Scripts/python.exe",
+      "runtimeArgs": ["backend/dev_server_sqlite.py"],
+      "port": 8001
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "frontend/dev.cmd",
+      "runtimeArgs": [],
+      "port": 3001
+    }
+  ]
+}

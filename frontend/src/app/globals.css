@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0b0e14;
+  --color-panel: #12151f;
+  --color-panel-2: #171b28;
+  --color-border: #262b3a;
+  --color-text: #e6e8ec;
+  --color-text-muted: #8b93a7;
+  --color-text-faint: #5b6272;
+  --color-accent: #3b82f6;
+  --color-accent-dim: #1d4ed8;
+  --color-bull: #22c55e;
+  --color-bull-dim: #16a34a33;
+  --color-bear: #ef4444;
+  --color-bear-dim: #ef444433;
+  --color-warn: #f59e0b;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background: var(--color-accent-dim);
+  color: white;
+}
+
+/* thin scrollbars for dense data tables */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
