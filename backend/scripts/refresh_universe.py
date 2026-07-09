@@ -11,7 +11,7 @@ read what this script already persisted (see CLAUDE.md -> Conventions), so API u
 bounded to "once per ticker per run" regardless of how much screener/dashboard traffic
 the app gets.
 
-Needs real FMP_API_KEY / OPENAI_API_KEY / NEWS_API_KEY in the environment — this is NOT
+Needs real FMP_API_KEY / OPENAI_API_KEY / FINNHUB_API_KEY in the environment — this is NOT
 the local dev path (see dev_server_sqlite.py for that, which seeds fake data instead of
 calling any provider).
 """

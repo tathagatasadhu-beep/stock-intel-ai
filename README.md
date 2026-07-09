@@ -15,8 +15,13 @@ Full product spec: see `SPEC.md`. Current build status, architecture decisions, 
 - **Cache**: Redis (Render managed Redis) — screener result caching, rate-limit buffering for the market
   data provider
 - **Market data**: Financial Modeling Prep (fundamentals, ratios, price candles)
-- **News**: NewsAPI / Finnhub (headlines + sentiment)
+- **News**: Finnhub (headlines + sentiment)
 - **AI**: OpenAI (plain-English investment thesis, bullish/bearish + risk scoring)
+
+## Live
+
+- Frontend: https://stock-intel-ai-liart.vercel.app
+- Backend: https://stock-intel-ai-luk3.onrender.com (health check at `/api/health`)
 
 ## Repo layout
 

@@ -12,7 +12,7 @@ Not yet done for this project — this is the plan, to be executed once the owne
 - GitHub account
 - Accounts on [supabase.com](https://supabase.com), [vercel.com](https://vercel.com),
   [render.com](https://render.com)
-- API keys: OpenAI, Financial Modeling Prep, NewsAPI (or Finnhub) — see `backend/.env.example`
+- API keys: OpenAI, Financial Modeling Prep, Finnhub — see `backend/.env.example`
 - `git`, `node`, `python3` installed locally
 
 ## 1. Push this repo to GitHub
@@ -47,7 +47,7 @@ gh repo create stock-intel-ai --private --source=. --push
 2. Build command: `pip install -r requirements.txt`
 3. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 4. Add env vars from `backend/.env.example`: `DATABASE_URL`, `SUPABASE_URL`, `APP_JWT_SECRET`,
-   `OPENAI_API_KEY`, `FMP_API_KEY`, `NEWS_API_KEY`, `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASSWORD`/`ALERT_FROM_EMAIL`.
+   `OPENAI_API_KEY`, `FMP_API_KEY`, `FINNHUB_API_KEY`, `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASSWORD`/`ALERT_FROM_EMAIL`.
 5. Deploy. Note the resulting URL, e.g. `https://stock-intel-api.onrender.com`.
 6. New → Cron Job (or Background Worker), same repo/root directory, command:
    `python scripts/refresh_universe.py`. Schedule daily (S&P 500 fundamentals don't move intraday; re-run
@@ -73,7 +73,7 @@ gh repo create stock-intel-ai --private --source=. --push
 | Render (backend + cron job) | Free tier sleeps when idle; ~$7/mo each for always-on |
 | Financial Modeling Prep | Free tier is rate-limited (~250 req/day) — a daily full S&P 500 refresh needs a paid tier (~$20–30/mo range) |
 | OpenAI | Pay-per-use, driven by how many AI theses get (re)generated |
-| NewsAPI/Finnhub | Free tier available, rate-limited |
+| Finnhub | Free tier available, rate-limited |
 | Domain | ~$12/year |
 
 None of these depend on keeping a Claude subscription active — they bill independently through each

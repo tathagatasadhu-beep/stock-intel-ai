@@ -39,7 +39,7 @@ recommendation:
   - **Push notifications and Telegram/Discord alert delivery.** Only email delivery is wired up
     (`services/email_alerts.py`). The `Alert.delivery_method` column and `AlertType` enum already model the
     other channels — only the delivery integration is missing.
-  - **Reddit/X sentiment.** News sentiment currently covers NewsAPI/Finnhub headlines only.
+  - **Reddit/X sentiment.** News sentiment currently covers Finnhub headlines only.
   - **§7 Future Features** (options flow, insider tracker, earnings prediction, portfolio optimization,
     chatbot, backtesting) — none of these exist yet, matching the spec's own "future" framing.
 - **Infra adapted from the spec's §4** (owner-approved): the spec calls for Docker + AWS/GCP/Azure +
@@ -107,7 +107,7 @@ production — never in this repo. See `backend/.env.example` for the full list.
 
 - `OPENAI_API_KEY` — AI thesis generation (`services/ai_engine.py`)
 - `FMP_API_KEY` — Financial Modeling Prep: fundamentals, ratios, price candles (`services/market_data.py`)
-- `NEWS_API_KEY` — NewsAPI (or swap for Finnhub) headline feed (`services/news.py`)
+- `FINNHUB_API_KEY` — Finnhub company-news headline feed (`services/news.py`)
 - `DATABASE_URL` — Supabase pooler connection string (see EduQuestAI's `CLAUDE.md` for the exact pooler
   gotcha — identical requirement here: use the **pooler** host, port 6543, with
   `connect_args={"statement_cache_size": 0}` on the async engine, already wired in

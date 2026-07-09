@@ -1,13 +1,14 @@
 """
-News feed client (spec section 2.6). Uses NewsAPI by default (NEWS_API_KEY). Swap the
-`_fetch_newsapi` call for a Finnhub equivalent if you'd rather use that provider — the
-NewsArticle shape returned to callers is provider-agnostic on purpose.
+News feed client (spec section 2.6). Uses Finnhub's company-news endpoint
+(https://finnhub.io/docs/api/company-news) — free tier covers this. The NewsArticle
+shape returned to callers is provider-agnostic on purpose; swap `_fetch_finnhub` for
+another provider (NewsAPI, Alpha Vantage News) without touching any caller.
 
 Sentiment analysis: a simple lexicon-based scorer, not a call out to a separate sentiment
 model. Good enough for a "positive/neutral/negative" headline tag; the AI engine
 (services/ai_engine.py) does the deeper qualitative analysis via OpenAI.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -47,18 +48,19 @@ def estimate_impact(source: str, sentiment_score: float) -> str:
     return "low"
 
 
-async def fetch_news_for_ticker(ticker: str, company_name: str, page_size: int = 10) -> list[dict]:
-    if not settings.news_api_key:
+async def fetch_news_for_ticker(ticker: str, company_name: str, days_back: int = 7, limit: int = 10) -> list[dict]:
+    if not settings.finnhub_api_key:
         return []
-    async with httpx.AsyncClient(base_url=settings.news_api_base_url, timeout=20.0) as client:
+
+    today = datetime.now(timezone.utc).date()
+    async with httpx.AsyncClient(base_url=settings.finnhub_base_url, timeout=20.0) as client:
         resp = await client.get(
-            "/everything",
+            "/company-news",
             params={
-                "q": f'"{ticker}" OR "{company_name}"',
-                "language": "en",
-                "sortBy": "publishedAt",
-                "pageSize": page_size,
-                "apiKey": settings.news_api_key,
+                "symbol": ticker,
+                "from": (today - timedelta(days=days_back)).isoformat(),
+                "to": today.isoformat(),
+                "token": settings.finnhub_api_key,
             },
         )
         if resp.status_code != 200:
@@ -66,26 +68,23 @@ async def fetch_news_for_ticker(ticker: str, company_name: str, page_size: int =
         data = resp.json()
 
     articles = []
-    for row in data.get("articles", []):
-        headline = row.get("title") or ""
-        summary = row.get("description")
+    for row in data[:limit] if isinstance(data, list) else []:
+        headline = row.get("headline") or ""
+        summary = row.get("summary")
         sentiment_score, sentiment_label = score_sentiment(headline, summary)
-        published_at_raw = row.get("publishedAt")
-        try:
-            published_at = datetime.fromisoformat(published_at_raw.replace("Z", "+00:00")) if published_at_raw else datetime.now(timezone.utc)
-        except ValueError:
-            published_at = datetime.now(timezone.utc)
+        unix_ts = row.get("datetime")
+        published_at = datetime.fromtimestamp(unix_ts, tz=timezone.utc) if unix_ts else datetime.now(timezone.utc)
 
         articles.append(
             {
-                "source": (row.get("source") or {}).get("name") or "unknown",
+                "source": row.get("source") or "unknown",
                 "headline": headline,
                 "url": row.get("url"),
                 "summary": summary,
                 "published_at": published_at,
                 "sentiment_score": sentiment_score,
                 "sentiment_label": sentiment_label,
-                "impact_score": estimate_impact((row.get("source") or {}).get("name") or "", sentiment_score),
+                "impact_score": estimate_impact(row.get("source") or "", sentiment_score),
             }
         )
-    return [a for a in articles if a["url"]]
+    return [a for a in articles if a["url"] and a["headline"]]

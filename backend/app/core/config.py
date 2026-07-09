@@ -15,8 +15,8 @@ class Settings:
     fmp_api_key: str = field(default_factory=lambda: os.environ.get("FMP_API_KEY", ""))
     fmp_base_url: str = field(default_factory=lambda: os.environ.get("FMP_BASE_URL", "https://financialmodelingprep.com/api/v3"))
 
-    news_api_key: str = field(default_factory=lambda: os.environ.get("NEWS_API_KEY", ""))
-    news_api_base_url: str = field(default_factory=lambda: os.environ.get("NEWS_API_BASE_URL", "https://newsapi.org/v2"))
+    finnhub_api_key: str = field(default_factory=lambda: os.environ.get("FINNHUB_API_KEY", ""))
+    finnhub_base_url: str = field(default_factory=lambda: os.environ.get("FINNHUB_BASE_URL", "https://finnhub.io/api/v1"))
 
     smtp_host: str = field(default_factory=lambda: os.environ.get("SMTP_HOST", ""))
     smtp_port: int = field(default_factory=lambda: int(os.environ.get("SMTP_PORT", "587")))
