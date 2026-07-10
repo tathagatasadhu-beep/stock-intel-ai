@@ -1,18 +1,32 @@
 """
 Financial Modeling Prep client — fundamentals, ratios, growth metrics, financial-health
-scores, and historical price candles. See https://site.financialmodelingprep.com/developer/docs
-Only the fields this app actually persists (app/db/orm.py::FundamentalSnapshot) are mapped;
-FMP returns much more per endpoint that we don't use.
+scores, and historical price candles. Targets FMP's current `/stable` API
+(https://site.financialmodelingprep.com/developer/docs/stable), NOT the legacy `/api/v3`
+family — FMP retired `/api/v3` for anyone without a subscription predating August 2025
+(confirmed directly against the live API: every v3 endpoint now 403s "Legacy Endpoint").
+Only the fields this app actually persists (app/db/orm.py::FundamentalSnapshot) are
+mapped; FMP returns much more per endpoint that we don't use.
+
+The S&P 500 constituent list itself comes from services/sp500_universe.py (a static
+list), not FMP — `/stable/sp500-constituent` is a paid-tier-only "Restricted Endpoint"
+on a standard key (also confirmed live). See that module's docstring for why.
+
+`forward_pe` is intentionally always None — FMP's forward P/E requires the
+analyst-estimates endpoint, which needs a `period` parameter FMP's docs don't fully
+specify and which returned errors during testing; not worth guessing at for an MVP
+field that's secondary to trailing P/E.
 
 All functions return None/empty on missing data rather than raising, so a partial provider
 response degrades the app to "some fields missing" instead of an ingestion-run failure.
 """
+import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import httpx
 
 from app.core.config import settings
+from app.services.sp500_universe import SP500_UNIVERSE
 
 
 class MarketDataError(RuntimeError):
@@ -26,21 +40,8 @@ def _client() -> httpx.AsyncClient:
 
 
 async def get_sp500_constituents() -> list[dict]:
-    """Returns [{symbol, name, sector, industry}] for the current S&P 500."""
-    async with _client() as client:
-        resp = await client.get("/sp500_constituent", params={"apikey": settings.fmp_api_key})
-        resp.raise_for_status()
-        data = resp.json()
-    return [
-        {
-            "symbol": row.get("symbol"),
-            "name": row.get("name"),
-            "sector": row.get("sector"),
-            "sub_sector": row.get("subSector"),
-        }
-        for row in data
-        if row.get("symbol")
-    ]
+    """Returns [{symbol, name, sector}] — see sp500_universe.py for why this is static."""
+    return [{"symbol": row["symbol"], "name": row["name"], "sector": row["sector"]} for row in SP500_UNIVERSE]
 
 
 @dataclass
@@ -79,17 +80,23 @@ def _first(rows: list[dict] | None) -> dict:
 
 
 async def get_fundamentals(ticker: str) -> FundamentalsData | None:
-    """Fans out to FMP's quote/ratios/key-metrics/financial-growth/score endpoints and
-    merges them into one FundamentalsData record."""
+    """Fans out to FMP's quote/profile/ratios/key-metrics/financial-growth/
+    financial-scores/balance-sheet-statement/income-statement endpoints (all under
+    /stable) and merges them into one FundamentalsData record."""
     async with _client() as client:
-        params = {"apikey": settings.fmp_api_key}
-        quote_resp, profile_resp, ratios_resp, metrics_resp, growth_resp, score_resp = await _gather(
-            client.get(f"/quote/{ticker}", params=params),
-            client.get(f"/profile/{ticker}", params=params),
-            client.get(f"/ratios/{ticker}", params={**params, "limit": 1}),
-            client.get(f"/key-metrics/{ticker}", params={**params, "limit": 1}),
-            client.get(f"/financial-growth/{ticker}", params={**params, "limit": 1}),
-            client.get(f"/score", params={**params, "symbol": ticker}),
+        params = {"apikey": settings.fmp_api_key, "symbol": ticker}
+        (
+            quote_resp, profile_resp, ratios_resp, metrics_resp,
+            growth_resp, score_resp, balance_resp, income_resp,
+        ) = await _gather(
+            client.get("/quote", params=params),
+            client.get("/profile", params=params),
+            client.get("/ratios", params={**params, "limit": 1}),
+            client.get("/key-metrics", params={**params, "limit": 1}),
+            client.get("/financial-growth", params={**params, "limit": 1}),
+            client.get("/financial-scores", params=params),
+            client.get("/balance-sheet-statement", params={**params, "limit": 1}),
+            client.get("/income-statement", params={**params, "limit": 1}),
         )
 
     quote = _first(_safe_json(quote_resp))
@@ -98,56 +105,61 @@ async def get_fundamentals(ticker: str) -> FundamentalsData | None:
     metrics = _first(_safe_json(metrics_resp))
     growth = _first(_safe_json(growth_resp))
     score = _first(_safe_json(score_resp))
+    balance = _first(_safe_json(balance_resp))
+    income = _first(_safe_json(income_resp))
 
     price = quote.get("price")
     if price is None:
         return None
 
-    fcf_per_share = metrics.get("freeCashFlowPerShare") or 0
-    shares_out = quote.get("sharesOutstanding") or 0
-    free_cash_flow = (fcf_per_share * shares_out) or None
-
-    dividend_yield = metrics.get("dividendYield") or 0
-    dividend_per_share = (dividend_yield * price) or None
+    shares_out = income.get("weightedAverageShsOut")
+    fcf_per_share = ratios.get("freeCashFlowPerShare")
+    free_cash_flow = (fcf_per_share * shares_out) if (fcf_per_share and shares_out) else None
 
     return FundamentalsData(
         price=price,
-        market_cap=quote.get("marketCap"),
-        exchange=quote.get("exchange") or profile.get("exchangeShortName"),
-        pe_ratio=quote.get("pe") or ratios.get("priceEarningsRatio"),
-        forward_pe=metrics.get("peRatio"),
-        peg_ratio=ratios.get("priceEarningsToGrowthRatio"),
+        market_cap=quote.get("marketCap") or profile.get("marketCap"),
+        exchange=quote.get("exchange") or profile.get("exchange"),
+        pe_ratio=ratios.get("priceToEarningsRatio"),
+        forward_pe=None,
+        peg_ratio=ratios.get("priceToEarningsGrowthRatio"),
         price_to_book=ratios.get("priceToBookRatio"),
-        ev_ebitda=ratios.get("enterpriseValueMultiple"),
+        ev_ebitda=metrics.get("evToEBITDA"),
         revenue_growth_yoy=growth.get("revenueGrowth"),
         eps_growth=growth.get("epsgrowth"),
         fcf_growth=growth.get("freeCashFlowGrowth"),
-        roe=ratios.get("returnOnEquity"),
-        roic=metrics.get("roic"),
-        debt_equity=ratios.get("debtEquityRatio"),
+        roe=metrics.get("returnOnEquity"),
+        roic=metrics.get("returnOnInvestedCapital"),
+        debt_equity=ratios.get("debtToEquityRatio"),
         current_ratio=ratios.get("currentRatio"),
-        interest_coverage=ratios.get("interestCoverage"),
+        interest_coverage=ratios.get("interestCoverageRatio"),
         altman_z_score=score.get("altmanZScore"),
         free_cash_flow=free_cash_flow,
-        shares_outstanding=quote.get("sharesOutstanding"),
-        total_debt=metrics.get("totalDebt"),
-        cash_and_equivalents=metrics.get("cashAndCashEquivalents"),
-        dividend_per_share=dividend_per_share,
-        eps=quote.get("eps"),
-        book_value_per_share=metrics.get("bookValuePerShare"),
+        shares_outstanding=shares_out,
+        total_debt=balance.get("totalDebt"),
+        cash_and_equivalents=balance.get("cashAndCashEquivalents"),
+        dividend_per_share=ratios.get("dividendPerShare"),
+        eps=income.get("eps"),
+        book_value_per_share=ratios.get("bookValuePerShare"),
         week52_high=quote.get("yearHigh"),
         week52_low=quote.get("yearLow"),
-        avg_volume=quote.get("avgVolume"),
+        avg_volume=profile.get("averageVolume"),
     )
 
 
 async def get_historical_candles(ticker: str, days: int = 400) -> list[dict]:
     """Returns [{date, open, high, low, close, volume}] ascending by date."""
+    to_date = date.today()
+    from_date = to_date - timedelta(days=int(days * 1.6))  # padding for weekends/holidays
     async with _client() as client:
-        resp = await client.get(f"/historical-price-full/{ticker}", params={"apikey": settings.fmp_api_key, "timeseries": days})
+        resp = await client.get(
+            "/historical-price-eod/full",
+            params={"symbol": ticker, "from": from_date.isoformat(), "to": to_date.isoformat(), "apikey": settings.fmp_api_key},
+        )
         resp.raise_for_status()
-        data = resp.json()
-    rows = data.get("historical", [])
+        rows = resp.json()
+    if not isinstance(rows, list):
+        return []
     rows.sort(key=lambda r: r["date"])
     return [
         {
@@ -158,7 +170,7 @@ async def get_historical_candles(ticker: str, days: int = 400) -> list[dict]:
             "close": r["close"],
             "volume": r.get("volume", 0),
         }
-        for r in rows
+        for r in rows[-days:]
     ]
 
 
@@ -174,8 +186,6 @@ def _safe_json(resp: httpx.Response | BaseException) -> list[dict] | None:
 
 
 async def _gather(*coros):
-    import asyncio
-
     # One endpoint failing (rate limit, 404 for a delisted ticker, transient network error)
     # shouldn't abort the whole fundamentals fetch — _safe_json treats an exception the
     # same as a missing field, so the caller just ends up with that field as None.

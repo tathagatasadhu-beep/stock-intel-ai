@@ -13,11 +13,29 @@ root — that's the original product spec verbatim.
 This is a **separate product from EduQuestAI** (a different repo, `../eduquest-ai`) — it reuses the same
 deploy pattern (Render + Vercel + Supabase) by owner preference, not because the two apps share any code.
 
-## Status: Phase 1 MVP, built locally, not yet deployed
+## Status: Phase 1 MVP, live in production (2026-07-09)
 
-Built in a single pass from the spec. Scaffolded to run and be verified locally; GitHub repo, Render
-service, Vercel project, and Supabase project have **not** been created yet — that's a deliberate next
-step the owner wants to review before it happens (see "Deploying" below).
+- **Frontend**: https://stock-intel-ai-liart.vercel.app
+- **Backend**: https://stock-intel-ai-luk3.onrender.com — health check at `/api/health`
+- **Database**: Supabase Postgres, project ref `rsixtlqjahqxwsbzgabf`
+- **GitHub**: https://github.com/tathagatasadhu-beep/stock-intel-ai
+
+## FMP API migration (discovered during first live deploy, 2026-07-09)
+
+Built and locally tested against FMP's legacy `/api/v3/*` endpoints, which turned out to be
+**403-Forbidden for any key without a subscription predating August 2025** — confirmed directly against
+the live API the first time `scripts/refresh_universe.py` ran for real. `services/market_data.py` was
+rewritten against FMP's current `/stable/*` API (different base URL, different field names — e.g.
+`priceEarningsRatio` → `priceToEarningsRatio`, `debtEquityRatio` → `debtToEquityRatio`, fundamentals now
+split across `/quote`, `/profile`, `/ratios`, `/key-metrics`, `/financial-growth`, `/financial-scores`,
+`/balance-sheet-statement`, `/income-statement` instead of the old `/quote/{symbol}`-style path params).
+`forward_pe` is now always `None` — the analyst-estimates endpoint needed for it errored during testing
+and wasn't worth blocking on for an MVP-secondary field.
+
+**The S&P 500 constituent list itself (`/stable/sp500-constituent`) is paid-tier-only** — also confirmed
+live, not a guess. `services/sp500_universe.py` is a static, hand-curated list of ~168 of the largest S&P
+500 constituents across all 11 GICS sectors instead — see that file's docstring for the reasoning and how
+to expand it. This means the screener currently covers a *subset* of the S&P 500, not all ~503 names.
 
 ### Scope decisions made against the spec (owner-approved, 2026-07-08)
 
@@ -133,16 +151,35 @@ production — never in this repo. See `backend/.env.example` for the full list.
   data is shared/public within this app) is scoped by `user_id` — same "app-layer filter, don't rely on RLS
   alone" pattern as EduQuestAI's `parent_id` convention.
 
-## Deploying (not done yet — owner wants to review the code first)
+## Deploying — already done once; gotchas hit along the way
 
-1. Create the GitHub repo (`stock-intel-ai`, private) and push.
-2. Create a new Supabase project; run the schema creation (SQLAlchemy `Base.metadata.create_all` via a
-   one-off script, or hand-write SQL — no Alembic migrations exist yet since the schema hasn't shipped
-   once). Get the **pooler** connection string from Supabase's dashboard "Connect" dialog (region-specific,
-   don't guess it).
-3. Create a Render **web service** for `backend/` (build: `pip install -r requirements.txt`, start:
-   `uvicorn app.main:app --host 0.0.0.0 --port $PORT`) and a Render **cron job** or background worker for
-   `scripts/refresh_universe.py` on a daily schedule (S&P 500 fundamentals/candles don't need intraday
-   refresh for a screener).
-4. Create a Vercel project for `frontend/`, set `BACKEND_URL` to the Render service URL.
-5. Set all env vars from `backend/.env.example` in Render, and `BACKEND_URL` in Vercel.
+Actual deploy sequence used (see git log for the exact commits): GitHub repo → Supabase project → Render
+web service (`backend/`, root directory **must** be set to `backend` at import time, not fixed after —
+see gotcha below) → Render cron job (`scripts/refresh_universe.py`, same root-directory requirement,
+separately) → Vercel project (`frontend/`, root directory **must** be `frontend`).
+
+Gotchas hit deploying this for real, in case any of this needs redoing:
+
+- **Vercel/Render "Root Directory" must be set correctly at project-creation time.** Changing it after the
+  fact in Settings and clicking Redeploy did **not** reliably pick up the change — the Vercel project kept
+  serving the FastAPI backend's 404 response (`{"detail":"Not Found"}`, distinguishable from Next.js's own
+  404 by the exact body shape and by `/api/health`/`/docs` responding 200 on what should've been the
+  frontend domain) until a fresh commit was pushed to force a truly new build. If a Root Directory ever
+  looks wrong post-deploy, don't trust "Redeploy" on an old deployment — push a new commit or re-import the
+  project from scratch.
+- **A brand-new Supabase project's connection pooler can briefly `ConnectionRefusedError` (`errno 111`)
+  even though the hostname resolves and the port is genuinely open** (verified independently during
+  debugging) and even with Network Restrictions correctly set to "allow all" and Connection Pooling shown
+  healthy in the dashboard. It self-resolved after a bit of time (likely Supavisor finishing tenant
+  registration for the new project) — no config change actually fixed it. If this happens again on a fresh
+  project, the fix is patience + retrying, not more config changes.
+- **Schema creation isn't a separate step** — `scripts/refresh_universe.py` runs `Base.metadata.create_all`
+  itself at the top of `main()` before touching any provider API, so the very first Cron Job run creates
+  every table. No Alembic migrations exist; if the schema ever changes, either hand-write `ALTER TABLE`s or
+  add Alembic at that point.
+- **FMP quota**: the free tier is far too small for this project's real shape. See the FMP API migration
+  section above — with the static ~168-ticker universe and 9 FMP calls per ticker (quote, profile, ratios,
+  key-metrics, financial-growth, financial-scores, balance-sheet-statement, income-statement, historical
+  candles), one full refresh is ~1,500 calls. A free-tier key (~250 req/day) will only get partway through
+  before silently skipping the rest for the day (by design — see `services/market_data.py`'s error
+  handling); full same-day coverage needs a paid FMP tier.

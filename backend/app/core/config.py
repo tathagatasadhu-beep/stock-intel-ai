@@ -13,7 +13,7 @@ class Settings:
     openai_model: str = field(default_factory=lambda: os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 
     fmp_api_key: str = field(default_factory=lambda: os.environ.get("FMP_API_KEY", ""))
-    fmp_base_url: str = field(default_factory=lambda: os.environ.get("FMP_BASE_URL", "https://financialmodelingprep.com/api/v3"))
+    fmp_base_url: str = field(default_factory=lambda: os.environ.get("FMP_BASE_URL", "https://financialmodelingprep.com/stable"))
 
     finnhub_api_key: str = field(default_factory=lambda: os.environ.get("FINNHUB_API_KEY", ""))
     finnhub_base_url: str = field(default_factory=lambda: os.environ.get("FINNHUB_BASE_URL", "https://finnhub.io/api/v1"))
