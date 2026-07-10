@@ -15,7 +15,7 @@ deploy pattern (Render + Vercel + Supabase) by owner preference, not because the
 
 ## Status: Phase 1 MVP, live in production (2026-07-09)
 
-- **Frontend**: https://stock-intel-ai-liart.vercel.app
+- **Frontend**: https://stock-intel-ai-alpha.vercel.app
 - **Backend**: https://stock-intel-ai-luk3.onrender.com — health check at `/api/health`
 - **Database**: Supabase Postgres, project ref `rsixtlqjahqxwsbzgabf`
 - **GitHub**: https://github.com/tathagatasadhu-beep/stock-intel-ai
@@ -166,7 +166,8 @@ Gotchas hit deploying this for real, in case any of this needs redoing:
   404 by the exact body shape and by `/api/health`/`/docs` responding 200 on what should've been the
   frontend domain) until a fresh commit was pushed to force a truly new build. If a Root Directory ever
   looks wrong post-deploy, don't trust "Redeploy" on an old deployment — push a new commit or re-import the
-  project from scratch.
+  project from scratch. This actually happened here — the Vercel project ended up re-imported from scratch,
+  which is why the live URL is `stock-intel-ai-alpha.vercel.app` and not whatever it was originally.
 - **A brand-new Supabase project's connection pooler can briefly `ConnectionRefusedError` (`errno 111`)
   even though the hostname resolves and the port is genuinely open** (verified independently during
   debugging) and even with Network Restrictions correctly set to "allow all" and Connection Pooling shown

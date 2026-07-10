@@ -20,7 +20,7 @@ Full product spec: see `SPEC.md`. Current build status, architecture decisions, 
 
 ## Live
 
-- Frontend: https://stock-intel-ai-liart.vercel.app
+- Frontend: https://stock-intel-ai-alpha.vercel.app
 - Backend: https://stock-intel-ai-luk3.onrender.com (health check at `/api/health`)
 
 ## Repo layout
