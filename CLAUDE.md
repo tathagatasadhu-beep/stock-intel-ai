@@ -33,9 +33,12 @@ split across `/quote`, `/profile`, `/ratios`, `/key-metrics`, `/financial-growth
 and wasn't worth blocking on for an MVP-secondary field.
 
 **The S&P 500 constituent list itself (`/stable/sp500-constituent`) is paid-tier-only** — also confirmed
-live, not a guess. `services/sp500_universe.py` is a static, hand-curated list of ~168 of the largest S&P
-500 constituents across all 11 GICS sectors instead — see that file's docstring for the reasoning and how
-to expand it. This means the screener currently covers a *subset* of the S&P 500, not all ~503 names.
+live, not a guess. `services/sp500_universe.py` is a static, hand-curated list (expanded from ~168 to ~467
+on 2026-09-06 after a user search for an uncovered ticker) of the largest S&P 500 constituents across all
+11 GICS sectors instead — see that file's docstring for the reasoning and how to expand it further. This
+means the screener currently covers a large *subset* of the S&P 500, not all ~503 names — a ticker search
+that comes back "Not covered by this screener" (see `frontend/src/app/stock/[ticker]/page.tsx`) means
+extend that list, not a bug.
 
 ### Scope decisions made against the spec (owner-approved, 2026-07-08)
 
@@ -179,8 +182,11 @@ Gotchas hit deploying this for real, in case any of this needs redoing:
   every table. No Alembic migrations exist; if the schema ever changes, either hand-write `ALTER TABLE`s or
   add Alembic at that point.
 - **FMP quota**: the free tier is far too small for this project's real shape. See the FMP API migration
-  section above — with the static ~168-ticker universe and 9 FMP calls per ticker (quote, profile, ratios,
+  section above — with the static ~467-ticker universe and 9 FMP calls per ticker (quote, profile, ratios,
   key-metrics, financial-growth, financial-scores, balance-sheet-statement, income-statement, historical
-  candles), one full refresh is ~1,500 calls. A free-tier key (~250 req/day) will only get partway through
+  candles), one full refresh is ~4,200 calls. A free-tier key (~250 req/day) will only get partway through
   before silently skipping the rest for the day (by design — see `services/market_data.py`'s error
-  handling); full same-day coverage needs a paid FMP tier.
+  handling); full same-day coverage needs a paid FMP tier. `scripts/refresh_universe.py` rotates its
+  starting point through the universe by one ticker per calendar day specifically so a quota-limited run
+  still makes cumulative progress across the whole list instead of always stalling on the same tickers —
+  see the comment above the `offset` calculation in `main()` if that ever needs revisiting.

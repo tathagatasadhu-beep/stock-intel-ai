@@ -1,6 +1,7 @@
-import { notFound } from "next/navigation";
+import Link from "next/link";
 import {
   AIAnalysisOut,
+  BackendError,
   CandleOut,
   FibonacciOut,
   FundamentalsOut,
@@ -30,8 +31,57 @@ export default async function StockDetailPage({ params }: { params: Promise<{ ti
   const { ticker: rawTicker } = await params;
   const ticker = rawTicker.toUpperCase();
 
-  const [fundamentals, candles, technicals, technicalsSeries, fibonacci, valuation, news, aiAnalysis] = await Promise.all([
-    safe(backendFetch<FundamentalsOut>(`/api/stocks/${ticker}`)),
+  let fundamentals: FundamentalsOut | null = null;
+  let notCoveredReason: string | null = null;
+  try {
+    fundamentals = await backendFetch<FundamentalsOut>(`/api/stocks/${ticker}`);
+  } catch (err) {
+    // Distinguish "not in our screener universe at all" (ticker unknown to the backend)
+    // from "in the universe but not ingested yet" (fundamentals just missing) — these
+    // need different messages, not a generic 404.
+    if (err instanceof BackendError && err.status === 404) {
+      notCoveredReason = err.message.includes("Unknown ticker")
+        ? "not-covered"
+        : "not-yet-ingested";
+    } else {
+      notCoveredReason = "error";
+    }
+  }
+
+  if (!fundamentals) {
+    return (
+      <div className="mx-auto max-w-md px-4 py-24 text-center">
+        <h1 className="mb-2 text-xl font-bold text-text">{ticker}</h1>
+        {notCoveredReason === "not-covered" ? (
+          <>
+            <p className="mb-2 text-lg font-semibold text-text">Not covered by this screener</p>
+            <p className="text-sm text-text-muted">
+              {ticker} isn&apos;t in our current S&amp;P 500 coverage universe (a curated subset, not the full
+              index — see the screener for what is covered).
+            </p>
+          </>
+        ) : notCoveredReason === "not-yet-ingested" ? (
+          <>
+            <p className="mb-2 text-lg font-semibold text-text">Not refreshed yet</p>
+            <p className="text-sm text-text-muted">
+              {ticker} is in our coverage universe but hasn&apos;t been picked up by a data refresh yet — check
+              back after the next run.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="mb-2 text-lg font-semibold text-text">Couldn&apos;t load this stock</p>
+            <p className="text-sm text-text-muted">Something went wrong talking to the backend — try again shortly.</p>
+          </>
+        )}
+        <Link href="/" className="mt-6 inline-block rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-dim">
+          Back to Screener
+        </Link>
+      </div>
+    );
+  }
+
+  const [candles, technicals, technicalsSeries, fibonacci, valuation, news, aiAnalysis] = await Promise.all([
     safe(backendFetch<CandleOut[]>(`/api/stocks/${ticker}/candles?days=400`)),
     safe(backendFetch<TechnicalsOut>(`/api/technicals/${ticker}`)),
     safe(backendFetch<TechnicalsSeries>(`/api/technicals/${ticker}/series`)),
@@ -40,8 +90,6 @@ export default async function StockDetailPage({ params }: { params: Promise<{ ti
     safe(backendFetch<NewsArticleOut[]>(`/api/news/${ticker}`)),
     safe(backendFetch<AIAnalysisOut>(`/api/stocks/${ticker}/ai-analysis`)),
   ]);
-
-  if (!fundamentals) notFound();
 
   return (
     <div className="mx-auto max-w-[1600px] px-4 py-6">
