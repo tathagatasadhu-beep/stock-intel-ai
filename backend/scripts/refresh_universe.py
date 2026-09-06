@@ -413,6 +413,15 @@ async def main():
     constituents = await market_data.get_sp500_constituents()
     print(f"[refresh_universe] {len(constituents)} S&P 500 constituents")
 
+    # Rotate the starting point daily so a quota-limited run (see CLAUDE.md -> FMP
+    # quota) makes cumulative progress across the whole universe instead of always
+    # succeeding on the same tickers at the front of the list and never reaching the
+    # rest. Deterministic on the date, so re-running this script twice in one day
+    # (e.g. a manual retry) hits the same order rather than shuffling randomly.
+    offset = date.today().toordinal() % len(constituents)
+    constituents = constituents[offset:] + constituents[:offset]
+    print(f"[refresh_universe] starting from offset {offset} ({constituents[0]['symbol']}) to spread FMP quota usage across the universe over time")
+
     sem = asyncio.Semaphore(CONCURRENCY)
     tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem) for c in constituents]
     results = [r for r in await asyncio.gather(*tasks) if r]
