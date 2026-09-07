@@ -149,7 +149,16 @@ production — never in this repo. See `backend/.env.example` for the full list.
 - All computed analytics (technicals, valuation, composite score, AI thesis) are **persisted**, not
   computed on every request — `scripts/refresh_universe.py` computes and stores a snapshot per ticker on
   each run; API routers read the latest stored snapshot. This keeps the screener fast (no live FMP/OpenAI
-  calls in the request path) and keeps provider API usage bounded and predictable.
+  calls in the request path) and keeps provider API usage bounded and predictable. The one exception is
+  **on-demand refresh** (`POST /api/stocks/{ticker}/refresh`, added 2026-09-07): a user viewing a
+  covered-but-not-yet-ingested ticker (universe is ~467 tickers, daily batch only gets through
+  ~25-30/day on the free FMP tier — see "FMP quota" below) can trigger a real, synchronous fetch for just
+  that one ticker instead of waiting for the batch job to rotate around to it. The fetch/compute/score
+  pipeline itself lives in `app/services/ingest.py`, shared by both the batch script and this route so
+  there's exactly one implementation of "how to ingest a ticker" — see that module's docstring. Idempotent
+  per day (checks for today's snapshot before spending any provider quota), which is also what makes it
+  safe to leave unauthenticated: worst case is one real ingestion per ticker per day, the same cost as that
+  ticker being covered by the batch job.
 - Every table that could ever be scoped to a signed-in user (currently just `Alert`, since screener/stock
   data is shared/public within this app) is scoped by `user_id` — same "app-layer filter, don't rely on RLS
   alone" pattern as EduQuestAI's `parent_id` convention.

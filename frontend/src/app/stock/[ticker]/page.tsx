@@ -18,6 +18,7 @@ import { IndicatorPanel } from "@/components/IndicatorPanel";
 import { ValuationPanel } from "@/components/ValuationPanel";
 import { AIAnalysisCard } from "@/components/AIAnalysisCard";
 import { NewsFeed } from "@/components/NewsFeed";
+import { RefreshNowButton } from "@/components/RefreshNowButton";
 
 async function safe<T>(promise: Promise<T>): Promise<T | null> {
   try {
@@ -64,9 +65,9 @@ export default async function StockDetailPage({ params }: { params: Promise<{ ti
           <>
             <p className="mb-2 text-lg font-semibold text-text">Not refreshed yet</p>
             <p className="text-sm text-text-muted">
-              {ticker} is in our coverage universe but hasn&apos;t been picked up by a data refresh yet — check
-              back after the next run.
+              {ticker} is in our coverage universe but hasn&apos;t been picked up by a data refresh yet.
             </p>
+            <RefreshNowButton ticker={ticker} />
           </>
         ) : (
           <>

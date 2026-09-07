@@ -1,4 +1,9 @@
-"""GET /stocks/{ticker} — fundamentals + recent candles for a single stock (spec section 5)."""
+"""GET /stocks/{ticker} — fundamentals + recent candles for a single stock (spec section 5).
+POST /stocks/{ticker}/refresh — on-demand ingestion for a covered-but-not-yet-refreshed
+ticker, so a user doesn't have to wait for the next scheduled batch run (see CLAUDE.md ->
+"On-demand refresh")."""
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,11 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.orm import AIAnalysis, FundamentalSnapshot, PriceCandle, Stock
 from app.db.session import get_db
 from app.models.schemas import AIAnalysisOut, CandleOut, FundamentalsOut, StockSummary
+from app.services import ingest
 from app.services.sp500_universe import SP500_UNIVERSE
 
 router = APIRouter()
 
 _UNIVERSE_SYMBOLS = {row["symbol"] for row in SP500_UNIVERSE}
+_UNIVERSE_BY_SYMBOL = {row["symbol"]: row for row in SP500_UNIVERSE}
 
 
 async def _get_stock_or_404(ticker: str, db: AsyncSession) -> Stock:
@@ -106,3 +113,50 @@ async def get_ai_analysis(ticker: str, db: AsyncSession = Depends(get_db)):
         target_6m=analysis.target_6m,
         target_1y=analysis.target_1y,
     )
+
+
+@router.post("/{ticker}/refresh")
+async def refresh_stock_now(ticker: str, db: AsyncSession = Depends(get_db)):
+    """Fetches live data for one ticker right now instead of waiting for the next
+    scheduled batch run — for a ticker that's in our coverage universe but hasn't been
+    ingested yet (e.g. this week's FMP-quota rotation hasn't reached it). Takes several
+    seconds (real FMP/OpenAI/Finnhub calls); the frontend shows a loading state while
+    this runs (see components/RefreshNowButton.tsx).
+
+    Idempotent per day: if this ticker already has today's snapshot, returns
+    immediately without spending any provider quota — this is also what makes it safe
+    to expose without auth or extra rate-limiting of its own; the worst case is one
+    real ingestion per ticker per day, same cost as that ticker being covered by the
+    batch job."""
+    ticker = ticker.upper()
+    universe_row = _UNIVERSE_BY_SYMBOL.get(ticker)
+    if universe_row is None:
+        raise HTTPException(status_code=400, detail=f"{ticker} is not part of this screener's coverage universe.")
+
+    today = date.today()
+
+    existing_stock = (await db.execute(select(Stock).where(Stock.ticker == ticker))).scalar_one_or_none()
+    if existing_stock is not None:
+        already_current = (
+            await db.execute(
+                select(FundamentalSnapshot).where(FundamentalSnapshot.stock_id == existing_stock.id, FundamentalSnapshot.as_of_date == today)
+            )
+        ).scalar_one_or_none()
+        if already_current is not None:
+            return {"status": "already_current", "ticker": ticker}
+
+    try:
+        result = await ingest.ingest_ticker(db, ticker, universe_row["name"], universe_row["sector"], today)
+    except Exception as exc:  # noqa: BLE001 - surface as a clean 502, not a 500 traceback
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"Failed to fetch live data for {ticker}: {exc}") from exc
+
+    if result is None:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"The market data provider had no data for {ticker} right now — try again shortly.")
+
+    pop = await ingest.build_population_from_db(db, today)
+    await ingest.score_and_analyze_one(db, result, pop, today)
+    await db.commit()
+
+    return {"status": "refreshed", "ticker": ticker}
