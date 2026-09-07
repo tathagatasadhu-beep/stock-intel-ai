@@ -193,7 +193,14 @@ async def get_fundamentals(ticker: str) -> FundamentalsData | None:
 async def _fetch_yahoo_candles(ticker: str, days: int) -> list[dict]:
     """[{date, open, high, low, close, volume}] ascending by date, or [] on any failure
     (bad symbol, blocked request, malformed response) so get_historical_candles can fall
-    back to FMP instead of raising — see module docstring for why Yahoo is tried first."""
+    back to FMP instead of raising — see module docstring for why Yahoo is tried first.
+
+    Logs the specific failure reason (status code / exception) rather than swallowing it
+    silently — confirmed live in production (2026-09-07) that Yahoo failed for every
+    single ticker in a batch run with no visibility into why, which is exactly the kind
+    of failure mode datacenter-IP blocking looks like (works from a residential/office IP
+    during local testing, blocked once deployed to Render's cloud IP range) but there was
+    no log line to actually confirm that theory."""
     async with httpx.AsyncClient(timeout=15.0, headers=_YAHOO_HEADERS) as client:
         try:
             resp = await client.get(
@@ -202,11 +209,17 @@ async def _fetch_yahoo_candles(ticker: str, days: int) -> list[dict]:
             )
             resp.raise_for_status()
             data = resp.json()
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPStatusError as exc:
+            print(f"[market_data] Yahoo candles failed for {ticker}: HTTP {exc.response.status_code} — {exc.response.text[:200]!r}")
+            return []
+        except (httpx.HTTPError, ValueError) as exc:
+            print(f"[market_data] Yahoo candles failed for {ticker}: {type(exc).__name__}: {exc}")
             return []
 
-    result = ((data.get("chart") or {}).get("result")) or []
+    chart = data.get("chart") or {}
+    result = chart.get("result") or []
     if not result:
+        print(f"[market_data] Yahoo candles empty for {ticker}: chart.error={chart.get('error')!r}")
         return []
     r = result[0]
     timestamps = r.get("timestamp") or []
