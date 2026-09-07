@@ -71,9 +71,9 @@ gh repo create stock-intel-ai --private --source=. --push
 | Vercel (frontend) | Free tier likely sufficient |
 | Supabase (DB/auth) | Free tier, then ~$25/mo if outgrown |
 | Render (backend + cron job) | Free tier sleeps when idle; ~$7/mo each for always-on |
-| Financial Modeling Prep | Free tier is rate-limited (~250 req/day) — a full refresh of the ~467-ticker static universe (see CLAUDE.md) needs ~4,200 calls, so full same-day coverage needs a paid tier (~$20–30/mo range) |
+| Financial Modeling Prep | Only used for historical candles now (1 call/ticker — fundamentals moved to Finnhub, see CLAUDE.md's "Finnhub fundamentals migration"); free tier's ~250 req/day covers the ~467-ticker universe in about 2 days |
+| Finnhub | Free tier available; no comparable daily cap to FMP's, just a per-minute rate limit — covers news plus fundamentals/ratios/quote now |
 | OpenAI | Pay-per-use, driven by how many AI theses get (re)generated |
-| Finnhub | Free tier available, rate-limited |
 | Domain | ~$12/year |
 
 None of these depend on keeping a Claude subscription active — they bill independently through each

@@ -14,7 +14,8 @@ Full product spec: see `SPEC.md`. Current build status, architecture decisions, 
 - **Database**: PostgreSQL via Supabase (also provides Auth)
 - **Cache**: Redis (Render managed Redis) — screener result caching, rate-limit buffering for the market
   data provider
-- **Market data**: Financial Modeling Prep (fundamentals, ratios, price candles)
+- **Market data**: Financial Modeling Prep (historical price candles only) + Finnhub (fundamentals, ratios,
+  quote — see CLAUDE.md's "Finnhub fundamentals migration" for why it's split this way)
 - **News**: Finnhub (headlines + sentiment)
 - **AI**: OpenAI (plain-English investment thesis, bullish/bearish + risk scoring)
 

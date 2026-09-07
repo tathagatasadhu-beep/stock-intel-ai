@@ -127,8 +127,9 @@ All live only in `backend/.env` (gitignored) locally and in Render/Vercel enviro
 production — never in this repo. See `backend/.env.example` for the full list. Summary:
 
 - `OPENAI_API_KEY` — AI thesis generation (`services/ai_engine.py`)
-- `FMP_API_KEY` — Financial Modeling Prep: fundamentals, ratios, price candles (`services/market_data.py`)
-- `FINNHUB_API_KEY` — Finnhub company-news headline feed (`services/news.py`)
+- `FMP_API_KEY` — Financial Modeling Prep: historical price candles only (`services/market_data.py`)
+- `FINNHUB_API_KEY` — Finnhub: company-news headline feed (`services/news.py`) **and**, since 2026-09-07,
+  fundamentals/ratios/quote (`services/market_data.py`) — see "Finnhub fundamentals migration" below
 - `DATABASE_URL` — Supabase pooler connection string (see EduQuestAI's `CLAUDE.md` for the exact pooler
   gotcha — identical requirement here: use the **pooler** host, port 6543, with
   `connect_args={"statement_cache_size": 0}` on the async engine, already wired in
@@ -151,9 +152,9 @@ production — never in this repo. See `backend/.env.example` for the full list.
   each run; API routers read the latest stored snapshot. This keeps the screener fast (no live FMP/OpenAI
   calls in the request path) and keeps provider API usage bounded and predictable. The one exception is
   **on-demand refresh** (`POST /api/stocks/{ticker}/refresh`, added 2026-09-07): a user viewing a
-  covered-but-not-yet-ingested ticker (universe is ~467 tickers, daily batch only gets through
-  ~25-30/day on the free FMP tier — see "FMP quota" below) can trigger a real, synchronous fetch for just
-  that one ticker instead of waiting for the batch job to rotate around to it. The fetch/compute/score
+  covered-but-not-yet-ingested ticker can trigger a real, synchronous fetch for just
+  that one ticker instead of waiting for the batch job to rotate around to it (see "Finnhub fundamentals
+  migration" below for why this is now cheap enough to leave unauthenticated and un-rate-limited). The fetch/compute/score
   pipeline itself lives in `app/services/ingest.py`, shared by both the batch script and this route so
   there's exactly one implementation of "how to ingest a ticker" — see that module's docstring. Idempotent
   per day (checks for today's snapshot before spending any provider quota), which is also what makes it
@@ -190,12 +191,35 @@ Gotchas hit deploying this for real, in case any of this needs redoing:
   itself at the top of `main()` before touching any provider API, so the very first Cron Job run creates
   every table. No Alembic migrations exist; if the schema ever changes, either hand-write `ALTER TABLE`s or
   add Alembic at that point.
-- **FMP quota**: the free tier is far too small for this project's real shape. See the FMP API migration
-  section above — with the static ~467-ticker universe and 9 FMP calls per ticker (quote, profile, ratios,
-  key-metrics, financial-growth, financial-scores, balance-sheet-statement, income-statement, historical
-  candles), one full refresh is ~4,200 calls. A free-tier key (~250 req/day) will only get partway through
-  before silently skipping the rest for the day (by design — see `services/market_data.py`'s error
-  handling); full same-day coverage needs a paid FMP tier. `scripts/refresh_universe.py` rotates its
-  starting point through the universe by one ticker per calendar day specifically so a quota-limited run
-  still makes cumulative progress across the whole list instead of always stalling on the same tickers —
-  see the comment above the `offset` calculation in `main()` if that ever needs revisiting.
+- **FMP quota** (mostly resolved 2026-09-07, see "Finnhub fundamentals migration" below): the original
+  design called FMP 9 times per ticker, so the ~467-ticker universe needed ~4,200 calls for one full
+  refresh against a ~250/day free-tier key — it also meant the on-demand refresh route
+  (`POST /api/stocks/{ticker}/refresh`) competed with the batch job for the same tiny budget and regularly
+  got "Limit Reach" 429s (confirmed live in production). FMP now handles only historical candles (1 call/
+  ticker), so a full refresh needs ~467 FMP calls — about 2 days of free-tier quota instead of ~19, with
+  plenty of headroom left for on-demand fetches too. `scripts/refresh_universe.py` still rotates its
+  starting point through the universe by one ticker per calendar day (see the comment above the `offset`
+  calculation in `main()`) so a quota-limited run keeps making cumulative progress either way — that safety
+  net didn't stop being worth keeping just because the math got better.
+
+## Finnhub fundamentals migration (2026-09-07)
+
+Fundamentals/ratios/quote (everything in `FundamentalSnapshot` except price history) moved from FMP to
+Finnhub — same key already used for news, no new signup or cost. Reasoning and the exact endpoint mapping
+live in `services/market_data.py`'s module docstring; the short version: Finnhub's free tier has no
+comparable daily cap (just a per-minute rate limit) and its `/stock/metric?metric=all` covers nearly
+everything FMP's fundamentals did, confirmed field-by-field against the live API before building this —
+including `forward_pe`, which FMP's free tier never provided at all. The one thing Finnhub's free tier
+won't do is historical OHLCV candles (confirmed live: 403 on `/stock/candle`), so FMP stays for exactly
+that one call per ticker.
+
+Two accuracy trade-offs worth knowing about if fundamentals ever look off for a Finnhub-sourced ticker:
+- `altman_z_score` is always `None` now (not available on Finnhub's free tier, and computing it from
+  scratch needs balance-sheet detail neither free tier exposes).
+- `total_debt` and `cash_and_equivalents` are derived (ratio × per-share metric × shares outstanding)
+  rather than read directly off a balance sheet, since Finnhub's free tier only exposes ratios/per-share
+  figures, not raw dollar balance-sheet lines. This is the same category of approximation the code already
+  made for `free_cash_flow` under the old FMP-only design, not a new kind of imprecision.
+
+Tickers ingested before this migration have FMP-sourced snapshots already in the DB — nothing retroactively
+changes them; the difference only shows up the next time each ticker gets refreshed.
