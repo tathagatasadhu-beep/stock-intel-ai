@@ -1,8 +1,14 @@
 """
-Daily universe refresh: pulls S&P 500 constituents + fundamentals + price candles from
-Financial Modeling Prep, computes technicals/Fibonacci/valuation/composite scores/AI
-analysis/news for every ticker, persists all of it, then checks active alerts and emails
-any that just triggered.
+Daily universe refresh: pulls S&P 500 constituents + fundamentals (Finnhub) + price
+candles (FMP) + computes technicals/Fibonacci/valuation/composite scores/AI analysis/
+news for every ticker, persists all of it, then checks active alerts and emails any
+that just triggered.
+
+Processes services/sp500_universe.py::CORE_TICKERS (a small always-fresh set) first, as
+its own fully-awaited batch, before spending any remaining FMP quota rotating through
+the rest of the ~467-ticker universe — see that list's comment for why. The screener is
+built around this: most days it'll mainly show the core set plus whatever else users
+have on-demand-refreshed (POST /api/stocks/{ticker}/refresh) rather than the full index.
 
 Run manually: `python scripts/refresh_universe.py`
 In production: scheduled as a Render Cron Job / Background Worker (see DEPLOY.md step 3.6).
@@ -34,6 +40,7 @@ from app.core.config import settings  # noqa: E402
 from app.db.orm import Alert, AppUser, FibonacciLevel, FundamentalSnapshot, Stock, TechnicalSnapshot  # noqa: E402
 from app.db.session import SessionLocal, engine  # noqa: E402
 from app.services import email_alerts, ingest, market_data, scoring  # noqa: E402
+from app.services.sp500_universe import CORE_TICKERS  # noqa: E402
 
 CONCURRENCY = 5
 TODAY = date.today()
@@ -158,20 +165,35 @@ async def main():
     constituents = await market_data.get_sp500_constituents()
     print(f"[refresh_universe] {len(constituents)} S&P 500 constituents")
 
-    # Rotate the starting point daily so a quota-limited run (see CLAUDE.md -> FMP
-    # quota) makes cumulative progress across the whole universe instead of always
-    # succeeding on the same tickers at the front of the list and never reaching the
-    # rest. Deterministic on the date, so re-running this script twice in one day
-    # (e.g. a manual retry) hits the same order rather than shuffling randomly.
-    offset = date.today().toordinal() % len(constituents)
-    constituents = constituents[offset:] + constituents[:offset]
-    print(f"[refresh_universe] starting from offset {offset} ({constituents[0]['symbol']}) to spread FMP quota usage across the universe over time")
+    # Core tickers (services/sp500_universe.py::CORE_TICKERS) are processed as their own
+    # sequential-then-awaited batch, fully completing before the broader universe pass
+    # even starts — this guarantees they get first claim on today's FMP quota rather
+    # than just a statistical edge from list order under concurrency. See that list's
+    # comment for why: a small always-fresh set the screener can rely on, instead of
+    # thinly spreading quota across all ~467 tickers so most are stale most of the time.
+    core_symbols = set(CORE_TICKERS)
+    core_constituents = [c for c in constituents if c["symbol"] in core_symbols]
+    rest_constituents = [c for c in constituents if c["symbol"] not in core_symbols]
+
+    # Rotate the starting point of the REST of the universe daily so any quota left over
+    # after the core set makes cumulative progress across the long tail instead of always
+    # succeeding on the same tickers at the front of the list. Deterministic on the date,
+    # so re-running this script twice in one day (e.g. a manual retry) hits the same
+    # order rather than shuffling randomly.
+    offset = date.today().toordinal() % len(rest_constituents)
+    rest_constituents = rest_constituents[offset:] + rest_constituents[:offset]
+    print(f"[refresh_universe] {len(core_constituents)} core tickers first, then long-tail offset {offset} ({rest_constituents[0]['symbol']})")
 
     sem = asyncio.Semaphore(CONCURRENCY)
-    tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem) for c in constituents]
-    results = [r for r in await asyncio.gather(*tasks) if r]
+    core_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem) for c in core_constituents]
+    core_results = [r for r in await asyncio.gather(*core_tasks) if r]
+    print(f"[refresh_universe] core set: {len(core_results)}/{len(core_constituents)} refreshed")
 
-    print(f"[refresh_universe] fundamentals/technicals computed for {len(results)} tickers")
+    rest_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem) for c in rest_constituents]
+    rest_results = [r for r in await asyncio.gather(*rest_tasks) if r]
+
+    results = core_results + rest_results
+    print(f"[refresh_universe] fundamentals/technicals computed for {len(results)} tickers total")
     async with SessionLocal() as db:
         await score_and_analyze(db, results)
         await check_and_send_alerts(db)

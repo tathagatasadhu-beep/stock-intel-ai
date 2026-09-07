@@ -203,7 +203,12 @@ class ScreenerFilters(BaseModel):
 
     sort_by: str = "composite_score"
     sort_desc: bool = True
-    limit: int = Field(default=50, ge=1, le=500)
+    # Default is 10, not a larger number — the batch job (scripts/refresh_universe.py)
+    # only guarantees CORE_TICKERS (~10) fresh daily and treats the rest of the universe
+    # as best-effort, so a small default matches what's actually reliably populated most
+    # days. Still overridable up to 500 for whoever's applied filters that narrow things
+    # down, or just wants to see everything that happens to be fresh.
+    limit: int = Field(default=10, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
 

@@ -223,3 +223,28 @@ Two accuracy trade-offs worth knowing about if fundamentals ever look off for a 
 
 Tickers ingested before this migration have FMP-sourced snapshots already in the DB — nothing retroactively
 changes them; the difference only shows up the next time each ticker gets refreshed.
+
+## Core-tickers-first batch prioritization (2026-09-08)
+
+Even after the Finnhub migration above cut FMP calls 9x, the batch job still attempts all ~467 tickers
+every run, so a full pass still costs ~467 FMP calls (candles) against a ~250/day free-tier cap — meaning
+most of the universe is stale most of the time, and on-demand refreshes (`POST /api/stocks/{ticker}/
+refresh`) still had to compete with the batch job for whatever quota was left.
+
+`scripts/refresh_universe.py` now processes `services/sp500_universe.py::CORE_TICKERS` — a small,
+hand-picked, fixed set of ~10 well-known megacaps (AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, JPM, WMT,
+XOM) — as its own fully-awaited batch *before* the rotated long-tail pass even starts, guaranteeing they
+get first claim on the day's FMP quota rather than just a statistical edge from list order. `ScreenerFilters
+.limit` (`app/models/schemas.py`) also defaults to 10 instead of 50, matching product intent: the screener
+is a small always-fresh view plus whatever else users have explicitly searched, not an attempt at ranking
+the full index. Verified locally (mocked providers, real batch-ordering logic): all 10 core tickers were
+the first 10 processed regardless of their position in the underlying list.
+
+Deliberately a **fixed** list, not "top N by market cap" or "top N by current score" — both of those are
+circular (a ticker that's never refreshed can never earn a market cap or score figure to enter the set).
+To change which tickers are always-fresh, just edit `CORE_TICKERS` directly.
+
+Note: viewing the screener page itself never spends API quota — it only reads already-persisted DB rows
+(`app/routers/screener.py`). All the quota cost is in `scripts/refresh_universe.py` (batch) and the
+on-demand refresh route; a smaller screener `limit` doesn't save quota by itself, it just matches the UI
+to what's realistically kept fresh.

@@ -510,3 +510,15 @@ SP500_UNIVERSE: list[dict[str, str]] = [
     {"symbol": "PARA", "name": "Paramount Skydance Corporation", "sector": "Communication Services"},
     {"symbol": "TTWO", "name": "Take-Two Interactive Software, Inc.", "sector": "Communication Services"},
 ]
+
+# Always-fresh core set (added 2026-09-08) — the daily batch job (scripts/refresh_universe.py)
+# refreshes these first, before spending any remaining FMP quota rotating through the rest
+# of the universe. Rationale: with FMP's free-tier daily cap, trying to keep all ~467
+# tickers fresh means most of them are stale most of the time and the screener has little
+# to show; a small guaranteed-fresh set plus on-demand refresh for anything else (see
+# POST /api/stocks/{ticker}/refresh) matches how this app is actually used — a handful of
+# people occasionally searching specific tickers, not needing the full index ranked at once.
+# Deliberately a fixed, hand-picked list rather than "top N by market cap" or "top N by
+# current score" — see the conversation in CLAUDE.md for why those were rejected (circular:
+# a ticker that's never refreshed can never earn a score/market-cap figure to enter the set).
+CORE_TICKERS: list[str] = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "JPM", "WMT", "XOM"]
