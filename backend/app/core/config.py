@@ -8,6 +8,9 @@ class Settings:
     supabase_url: str = field(default_factory=lambda: os.environ.get("SUPABASE_URL", "").rstrip("/"))
     supabase_anon_key: str = field(default_factory=lambda: os.environ.get("SUPABASE_ANON_KEY", ""))
     app_jwt_secret: str = field(default_factory=lambda: os.environ.get("APP_JWT_SECRET", ""))
+    # Where Supabase should send a user after they click a password-recovery email link —
+    # see routers/auth.py::forgot_password and frontend/src/app/reset-password/page.tsx.
+    frontend_url: str = field(default_factory=lambda: os.environ.get("FRONTEND_URL", "https://stock-intel-ai-alpha.vercel.app"))
 
     openai_api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
     openai_model: str = field(default_factory=lambda: os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))

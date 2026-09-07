@@ -315,3 +315,40 @@ its own deploy and the cron job's next run. Fixed by extracting a shared `ensure
 on every run after the first, caught and ignored) that now runs on **both** the web service's FastAPI
 startup event and the batch job's `main()`, so schema safety no longer depends on deploy order between the
 two services. Worth remembering for the next column added to an existing table.
+
+## Screener restored to full-universe coverage (2026-09-07)
+
+Now that candles (Yahoo) and fundamentals (Finnhub) both have no daily cap, the artificial limits added
+during the FMP quota crisis are gone: `scripts/refresh_universe.py` no longer caps the long-tail batch (see
+"Candles moved off FMP to Yahoo" above), and `ScreenerFilters.limit` (`app/models/schemas.py`) is back to a
+default of 50 (was 10). `CORE_TICKERS` still gets processed first in the batch job, but only so a handful of
+well-known megacaps land first if a run gets interrupted — not for quota reasons anymore.
+
+## Password reset (2026-09-07)
+
+Added after a live failure: a user tried to reset their password via a link Supabase itself generated
+(no app code was involved in sending it), and it redirected to `localhost:3000` — refused to connect,
+since nothing in this app was listening there. Root cause was Supabase's **Site URL** still pointing at
+localhost (a dev-time default nobody had changed), and — separately — this app never had a
+forgot-password flow of its own to redirect to even if Site URL were fixed.
+
+Built to mirror EduQuestAI's already-working `parent/forgot-password` → `parent/reset-password` pattern
+exactly, since it's the same Supabase-Auth-based flow with the same underlying constraint:
+- `POST /api/auth/forgot-password` (`app/routers/auth.py`) calls Supabase's `reset_password_for_email`
+  with `redirect_to={FRONTEND_URL}/reset-password`. Always returns 202 regardless of whether the email is
+  registered, so it can't be used to enumerate accounts.
+- `frontend/src/app/forgot-password/page.tsx` — plain BFF-proxied form, no different from login/signup.
+- `frontend/src/app/reset-password/page.tsx` — the one deliberate exception to "the browser never talks to
+  Supabase directly" (see file comment): Supabase's recovery flow needs the browser itself to hold the
+  recovery session from the emailed link and call `updateUser()`, which can't be proxied through the
+  httpOnly-cookie BFF pattern used everywhere else. Needs `NEXT_PUBLIC_SUPABASE_URL` /
+  `NEXT_PUBLIC_SUPABASE_ANON_KEY` as new **client-exposed** Vercel env vars — the anon key is meant to be
+  public (RLS-protected), unlike every other secret in this project.
+- New `FRONTEND_URL` backend env var (`app/core/config.py`, defaults to the production Vercel URL) — must
+  match an entry in Supabase's Authentication → URL Configuration → Redirect URLs, or Supabase silently
+  falls back to Site URL (see DEPLOY.md step 4.4 for the exact dashboard steps — this is a **manual
+  Supabase dashboard change**, not something either deploy alone fixes).
+
+Not yet verified against production (needs the Supabase dashboard changes above, which are outside what a
+deploy can do) — verify by requesting a reset for a real account once Site URL / Redirect URLs / Vercel env
+vars are all in place.

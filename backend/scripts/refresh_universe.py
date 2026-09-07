@@ -1,14 +1,15 @@
 """
 Daily universe refresh: pulls S&P 500 constituents + fundamentals (Finnhub) + price
-candles (FMP) + computes technicals/Fibonacci/valuation/composite scores/AI analysis/
-news for every ticker, persists all of it, then checks active alerts and emails any
-that just triggered.
+candles (Yahoo Finance, FMP fallback) + computes technicals/Fibonacci/valuation/composite
+scores/AI analysis/news for every ticker, persists all of it, then checks active alerts
+and emails any that just triggered.
 
-Processes services/sp500_universe.py::CORE_TICKERS (a small always-fresh set) first, as
-its own fully-awaited batch, before spending any remaining FMP quota rotating through
-the rest of the ~467-ticker universe — see that list's comment for why. The screener is
-built around this: most days it'll mainly show the core set plus whatever else users
-have on-demand-refreshed (POST /api/stocks/{ticker}/refresh) rather than the full index.
+Processes services/sp500_universe.py::CORE_TICKERS (a small, well-known set) first, as its
+own fully-awaited batch, then the rest of the ~467-ticker universe (rotated daily so a run
+that gets interrupted partway still makes cumulative progress). Both candles and
+fundamentals now come from providers with no daily cap (see CLAUDE.md -> "Candles moved
+off FMP to Yahoo", 2026-09-07), so a full run covers the whole universe every day — not
+just the core set.
 
 Run manually: `python scripts/refresh_universe.py`
 In production: scheduled as a Render Cron Job / Background Worker (see DEPLOY.md step 3.6).
@@ -54,15 +55,15 @@ from app.services.sp500_universe import CORE_TICKERS  # noqa: E402
 
 CONCURRENCY = 5
 TODAY = date.today()
-# FMP's free tier caps out around 250 calls/day (1 call/ticker for candles). The priority
-# tier (CORE_TICKERS + portfolio holdings) already claims its share first and is small
-# (~10-20 tickers), but the long-tail pass used to attempt all ~450+ remaining tickers
-# unconditionally every run — burning the ENTIRE day's remaining quota on the batch job
-# itself, so even a same-day on-demand refresh for an already-core ticker could land after
-# quota was gone. Capping the long tail leaves real headroom for on-demand fetches; the
-# daily rotation offset (below) still guarantees cumulative progress through the full
-# universe over multiple days.
-MAX_LONG_TAIL_PER_RUN = 150
+# The long-tail cap that used to live here (MAX_LONG_TAIL_PER_RUN) existed only to protect
+# FMP's ~250/day free-tier quota. Candles moved off FMP to Yahoo Finance's free, keyless,
+# no-daily-cap endpoint (see CLAUDE.md -> "Candles moved off FMP to Yahoo", 2026-09-07,
+# and services/market_data.py's module docstring) — Finnhub (fundamentals) never had a
+# daily cap either, just a per-minute rate limit. So the full ~467-ticker universe can go
+# back to refreshing every run, matching the original Phase 1 design intent. CORE_TICKERS
+# still gets processed first (services/sp500_universe.py) — not for quota reasons anymore,
+# just so a handful of well-known megacaps are always the first thing to land if a run gets
+# interrupted partway through.
 
 
 async def process_ticker(
@@ -224,8 +225,7 @@ async def main():
     # same order rather than shuffling randomly.
     offset = date.today().toordinal() % len(rest_constituents)
     rest_constituents = rest_constituents[offset:] + rest_constituents[:offset]
-    rest_constituents = rest_constituents[:MAX_LONG_TAIL_PER_RUN]
-    print(f"[refresh_universe] {len(priority_constituents)} priority tickers (core + portfolio) first, then long-tail offset {offset} ({rest_constituents[0]['symbol']}), capped at {MAX_LONG_TAIL_PER_RUN}")
+    print(f"[refresh_universe] {len(priority_constituents)} priority tickers (core + portfolio) first, then {len(rest_constituents)} long-tail tickers starting at offset {offset} ({rest_constituents[0]['symbol']})")
 
     sem = asyncio.Semaphore(CONCURRENCY)
     priority_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem, c["asset_type"], c["is_sp500"]) for c in priority_constituents]

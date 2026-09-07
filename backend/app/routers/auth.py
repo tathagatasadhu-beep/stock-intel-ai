@@ -9,11 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import get_current_user_claims
 from app.core.supabase_client import get_supabase
 from app.db.orm import AppUser
 from app.db.session import get_db
-from app.models.schemas import AuthToken, LoginRequest, SignupRequest, UserOut
+from app.models.schemas import AuthToken, ForgotPasswordRequest, LoginRequest, SignupRequest, UserOut
 
 router = APIRouter()
 
@@ -68,6 +69,22 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
         await db.commit()
 
     return AuthToken(access_token=result.session.access_token, user=UserOut(id=str(user_id), email=result.user.email))
+
+
+@router.post("/forgot-password", status_code=202)
+async def forgot_password(payload: ForgotPasswordRequest):
+    """Always responds 202 regardless of whether the email is registered, so this
+    endpoint can't be used to enumerate accounts. Supabase emails a recovery link to
+    `{FRONTEND_URL}/reset-password`, which the frontend handles client-side — see that
+    page for why (same exception to the BFF pattern as EduQuestAI's parent reset flow)."""
+    supabase = get_supabase()
+    try:
+        supabase.auth.reset_password_for_email(
+            payload.email, {"redirect_to": f"{settings.frontend_url}/reset-password"}
+        )
+    except Exception:  # noqa: BLE001 - never leak whether the email exists
+        pass
+    return {"detail": "If that email is registered, a reset link has been sent."}
 
 
 @router.get("/me")

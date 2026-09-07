@@ -46,7 +46,7 @@ gh repo create stock-intel-ai --private --source=. --push
 1. New → Web Service → connect the GitHub repo, root directory `backend/`.
 2. Build command: `pip install -r requirements.txt`
 3. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-4. Add env vars from `backend/.env.example`: `DATABASE_URL`, `SUPABASE_URL`, `APP_JWT_SECRET`,
+4. Add env vars from `backend/.env.example`: `DATABASE_URL`, `SUPABASE_URL`, `APP_JWT_SECRET`, `FRONTEND_URL`,
    `OPENAI_API_KEY`, `FMP_API_KEY`, `FINNHUB_API_KEY`, `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASSWORD`/`ALERT_FROM_EMAIL`.
 5. Deploy. Note the resulting URL, e.g. `https://stock-intel-api.onrender.com`.
 6. New → Cron Job (or Background Worker), same repo/root directory, command:
@@ -59,10 +59,21 @@ gh repo create stock-intel-ai --private --source=. --push
 ## 4. Frontend — Vercel
 
 1. Import the repo into Vercel, root directory `frontend/`.
-2. Add environment variable `BACKEND_URL` = the Render backend URL from step 3. That's the *only* env var
-   Vercel needs — same BFF architecture as EduQuestAI (browser never talks to the backend or Supabase
-   directly).
-3. Deploy. Vercel gives a `*.vercel.app` URL immediately; add a custom domain under Project → Domains later.
+2. Add environment variable `BACKEND_URL` = the Render backend URL from step 3. Same BFF architecture as
+   EduQuestAI (browser never talks to the backend directly) — this used to be the *only* env var Vercel
+   needed, but see the next step for the one deliberate exception.
+3. Also add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` (Supabase dashboard → Project
+   Settings → API). Needed only by `frontend/src/app/reset-password/page.tsx` — Supabase's password-recovery
+   flow requires the browser to hold the recovery session directly, so that one page is a deliberate
+   exception to "the browser never talks to Supabase directly" (see that file's comment, and CLAUDE.md ->
+   Conventions). The anon key is meant to be public (RLS-protected), unlike every other secret here.
+4. In the Supabase dashboard → Authentication → URL Configuration: set **Site URL** to the production
+   frontend URL, and add `<frontend-url>/reset-password` to **Redirect URLs**. Without this, Supabase's
+   password-reset emails link back to whatever Site URL is set (often still `localhost:3000` left over from
+   local dev), which 404s/refuses-to-connect for anyone who isn't running the frontend locally — confirmed
+   live, this exact failure mode is what led to building the reset-password flow in the first place
+   (2026-09-07).
+5. Deploy. Vercel gives a `*.vercel.app` URL immediately; add a custom domain under Project → Domains later.
 
 ## 5. Ongoing costs (separate from any Claude/Anthropic subscription)
 

@@ -44,6 +44,9 @@ export default function LoginPage() {
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <IconInput icon={Mail} type="email" required placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
           <IconInput icon={Lock} type="password" required placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <Link href="/forgot-password" className="self-end text-xs font-medium text-accent hover:underline">
+            Forgot password?
+          </Link>
           {error && <p className="text-sm text-bear">{error}</p>}
           <button
             type="submit"
