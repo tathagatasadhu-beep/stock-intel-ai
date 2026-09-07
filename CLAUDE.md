@@ -249,6 +249,18 @@ Note: viewing the screener page itself never spends API quota — it only reads 
 on-demand refresh route; a smaller screener `limit` doesn't save quota by itself, it just matches the UI
 to what's realistically kept fresh.
 
+## Long-tail batch cap (2026-09-07)
+
+The core-tickers-first prioritization above still let the long-tail pass attempt **all** ~450+
+non-priority tickers every run — confirmed live: a same-day on-demand refresh for WMT (a `CORE_TICKERS`
+member!) 429'd anyway, meaning the batch job itself had already burned the full day's FMP quota on the
+long tail before the user ever clicked "Fetch now." `scripts/refresh_universe.py::MAX_LONG_TAIL_PER_RUN`
+(150) now caps how many long-tail tickers one run will attempt, applied *after* the daily rotation offset
+so cumulative multi-day progress through the universe is unaffected — this leaves real same-day headroom
+for on-demand fetches instead of relying on FMP's own 429s as the only backstop. Tune the constant if the
+actual FMP plan's daily cap turns out to be different from the ~250 estimate (check the FMP dashboard's
+API usage page for the real number).
+
 ## Portfolio tracking (2026-09-08)
 
 Real stock/ETF positions with quantity + cost basis (`PortfolioHolding`), auth-gated the same way as Alerts

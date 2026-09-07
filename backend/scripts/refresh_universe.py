@@ -54,6 +54,15 @@ from app.services.sp500_universe import CORE_TICKERS  # noqa: E402
 
 CONCURRENCY = 5
 TODAY = date.today()
+# FMP's free tier caps out around 250 calls/day (1 call/ticker for candles). The priority
+# tier (CORE_TICKERS + portfolio holdings) already claims its share first and is small
+# (~10-20 tickers), but the long-tail pass used to attempt all ~450+ remaining tickers
+# unconditionally every run — burning the ENTIRE day's remaining quota on the batch job
+# itself, so even a same-day on-demand refresh for an already-core ticker could land after
+# quota was gone. Capping the long tail leaves real headroom for on-demand fetches; the
+# daily rotation offset (below) still guarantees cumulative progress through the full
+# universe over multiple days.
+MAX_LONG_TAIL_PER_RUN = 150
 
 
 async def process_ticker(
@@ -215,7 +224,8 @@ async def main():
     # same order rather than shuffling randomly.
     offset = date.today().toordinal() % len(rest_constituents)
     rest_constituents = rest_constituents[offset:] + rest_constituents[:offset]
-    print(f"[refresh_universe] {len(priority_constituents)} priority tickers (core + portfolio) first, then long-tail offset {offset} ({rest_constituents[0]['symbol']})")
+    rest_constituents = rest_constituents[:MAX_LONG_TAIL_PER_RUN]
+    print(f"[refresh_universe] {len(priority_constituents)} priority tickers (core + portfolio) first, then long-tail offset {offset} ({rest_constituents[0]['symbol']}), capped at {MAX_LONG_TAIL_PER_RUN}")
 
     sem = asyncio.Semaphore(CONCURRENCY)
     priority_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem, c["asset_type"], c["is_sp500"]) for c in priority_constituents]
