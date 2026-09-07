@@ -32,3 +32,21 @@ async def ensure_schema(engine: AsyncEngine) -> None:
             await conn.execute(text("ALTER TABLE stocks ADD COLUMN asset_type VARCHAR DEFAULT 'stock'"))
     except Exception:  # noqa: BLE001 - expected once the column already exists
         pass
+
+    # news_articles.url was globally unique, but the same wire article can legitimately
+    # be relevant news for more than one ticker (confirmed live: MPC's on-demand refresh
+    # 500'd on a duplicate-key IntegrityError for a URL already stored against a different
+    # stock) — app/db/orm.py::NewsArticle now declares uniqueness on (stock_id, url)
+    # instead. No existing row can violate the new constraint (it's strictly looser than
+    # the old one), so this is safe to run against data that already has the old
+    # constraint in place.
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE news_articles DROP CONSTRAINT IF EXISTS news_articles_url_key"))
+    except Exception:  # noqa: BLE001 - e.g. already dropped, or SQLite (no-op there anyway)
+        pass
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE news_articles ADD CONSTRAINT uq_news_stock_url UNIQUE (stock_id, url)"))
+    except Exception:  # noqa: BLE001 - expected once the constraint already exists
+        pass

@@ -234,13 +234,21 @@ class ValuationResult(Base):
 
 
 class NewsArticle(Base):
+    """A single wire article can legitimately be relevant news for more than one
+    ticker (e.g. a sector-wide Zacks/Yahoo piece mentioning both XOM and MPC) —
+    services/ingest.py::refresh_news already dedupes per stock_id, not globally, so
+    the same URL can and should get its own row per stock it's relevant to. Uniqueness
+    is therefore on (stock_id, url), not url alone (see the migration note in
+    app/db/migrate.py for the production fix)."""
+
     __tablename__ = "news_articles"
+    __table_args__ = (UniqueConstraint("stock_id", "url", name="uq_news_stock_url"),)
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     stock_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("stocks.id", ondelete="CASCADE"), nullable=True)
     source: Mapped[str] = mapped_column(String, nullable=False)
     headline: Mapped[str] = mapped_column(Text, nullable=False)
-    url: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    url: Mapped[str] = mapped_column(String, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 

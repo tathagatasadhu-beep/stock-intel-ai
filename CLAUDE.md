@@ -352,3 +352,21 @@ exactly, since it's the same Supabase-Auth-based flow with the same underlying c
 Not yet verified against production (needs the Supabase dashboard changes above, which are outside what a
 deploy can do) — verify by requesting a reset for a real account once Site URL / Redirect URLs / Vercel env
 vars are all in place.
+
+## News article uniqueness fix (2026-09-07)
+
+Confirmed live: an on-demand refresh for MPC 500'd with a Postgres `IntegrityError` — duplicate key on
+`news_articles_url_key`. Root cause was a mismatch between the DB constraint and the app's actual intent:
+`NewsArticle.url` was declared globally unique, but `services/ingest.py::refresh_news` only ever checked
+for an existing URL scoped to the *current* stock (`WHERE stock_id = :this_stock`) before inserting — so
+the same wire article being relevant news for two different tickers (e.g. a sector piece mentioning both
+XOM and MPC, both Energy) always worked for whichever stock ingested it first, then hard-failed the next
+stock's entire ingestion the moment Finnhub's company-news feed returned that same URL again.
+
+Fixed by changing the constraint to match what the code already assumed: `app/db/orm.py::NewsArticle` is
+now unique on `(stock_id, url)` instead of `url` alone — the same article can have one row per stock it's
+relevant to, still deduped within a single stock's own news feed. `app/db/migrate.py` drops the old
+`news_articles_url_key` constraint and adds the new composite one (safe against existing data — the new
+constraint is strictly looser than the old one, so no existing row can violate it). Verified locally against
+SQLite: the same URL across two different stocks now succeeds, while a genuine duplicate within one stock's
+feed still correctly rejects.
