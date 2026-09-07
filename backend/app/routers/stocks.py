@@ -6,15 +6,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.orm import AIAnalysis, FundamentalSnapshot, PriceCandle, Stock
 from app.db.session import get_db
 from app.models.schemas import AIAnalysisOut, CandleOut, FundamentalsOut, StockSummary
+from app.services.sp500_universe import SP500_UNIVERSE
 
 router = APIRouter()
+
+_UNIVERSE_SYMBOLS = {row["symbol"] for row in SP500_UNIVERSE}
 
 
 async def _get_stock_or_404(ticker: str, db: AsyncSession) -> Stock:
     result = await db.execute(select(Stock).where(Stock.ticker == ticker.upper()))
     stock = result.scalar_one_or_none()
     if stock is None:
-        raise HTTPException(status_code=404, detail=f"Unknown ticker: {ticker}")
+        # A missing `Stock` row means one of two different things, and the frontend
+        # (see stock/[ticker]/page.tsx) needs to tell them apart: genuinely outside our
+        # curated universe (services/sp500_universe.py) vs. in the universe but not yet
+        # ingested by scripts/refresh_universe.py (e.g. this week's FMP-quota rotation
+        # hasn't reached it yet). Same underlying condition (no row), different message.
+        if ticker.upper() in _UNIVERSE_SYMBOLS:
+            raise HTTPException(status_code=404, detail=f"{ticker.upper()} is in our coverage universe but hasn't been refreshed yet — check back after the next data refresh.")
+        raise HTTPException(status_code=404, detail=f"Unknown ticker: {ticker} — not part of this screener's coverage universe.")
     return stock
 
 
