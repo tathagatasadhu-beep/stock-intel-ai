@@ -21,7 +21,18 @@ export async function backendFetch<T>(path: string, init?: RequestInit): Promise
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new BackendError(res.status, body || res.statusText);
+    // FastAPI error bodies are {"detail": "..."} — extract the message instead of
+    // surfacing the raw JSON text (previously every error route handler passed this
+    // straight through to the UI, so a real backend error like a Supabase rate limit
+    // rendered as the literal string `{"detail":"email rate limit exceeded"}`).
+    let message = body || res.statusText;
+    try {
+      const parsed = JSON.parse(body);
+      if (typeof parsed?.detail === "string") message = parsed.detail;
+    } catch {
+      // not JSON — keep the raw text/statusText fallback above
+    }
+    throw new BackendError(res.status, message);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;

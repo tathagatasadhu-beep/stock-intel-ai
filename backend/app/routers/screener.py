@@ -57,9 +57,19 @@ async def run_screener(filters: ScreenerFilters = Depends(), db: AsyncSession = 
             )
         )
 
-    reverse = filters.sort_desc
-    sort_key = filters.sort_by if hasattr(ScreenerRow, filters.sort_by) else "composite_score"
-    rows.sort(key=lambda r: (getattr(r, sort_key) if getattr(r, sort_key) is not None else float("-inf")), reverse=reverse)
+    # `hasattr(ScreenerRow, name)` doesn't work for checking field names on a Pydantic v2
+    # model — the class itself doesn't expose fields as plain attributes (only instances
+    # do), so that check was always False and every sort silently fell back to
+    # composite_score regardless of what column was clicked. `model_fields` is the
+    # correct way to validate the field name.
+    sort_key = filters.sort_by if filters.sort_by in ScreenerRow.model_fields else "composite_score"
+    # Sort key is (is_none, value_or_0) rather than substituting a type-specific sentinel
+    # for None — tuple comparison short-circuits on the first element, so the `0` in the
+    # second slot is only ever compared against another `0` (both rows None) or never
+    # reached at all (is_none differs); real values are only ever compared against other
+    # real values of the same field, so this is safe regardless of the field's type
+    # (some sortable columns, e.g. margin_of_safety_pct, are nullable floats).
+    rows.sort(key=lambda r: (getattr(r, sort_key) is None, getattr(r, sort_key) or 0), reverse=filters.sort_desc)
     return rows[filters.offset : filters.offset + filters.limit]
 
 
