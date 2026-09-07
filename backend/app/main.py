@@ -12,13 +12,23 @@ load_dotenv()  # local dev only — Render sets real env vars directly in produc
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import alerts, auth, news, screener, stocks, technicals, valuation
+from app.db.migrate import ensure_schema
+from app.db.session import engine
+from app.routers import alerts, auth, news, portfolio, screener, stocks, technicals, valuation
 
 app = FastAPI(
     title="Stock Intelligence Platform API",
     version="0.1.0",
     description="Backend for the AI-powered stock screening, valuation, and technical analysis platform.",
 )
+
+
+@app.on_event("startup")
+async def on_startup():
+    # Self-healing schema check — see app/db/migrate.py for why the web service needs
+    # this independently of scripts/refresh_universe.py running the same thing, not just
+    # one or the other.
+    await ensure_schema(engine)
 
 # Irrelevant in production: the browser never talks to this API directly (see CLAUDE.md ->
 # Conventions, same BFF architecture as EduQuestAI). Only Next.js's server-side Route
@@ -37,6 +47,7 @@ app.include_router(valuation.router, prefix="/api/valuation", tags=["valuation"]
 app.include_router(screener.router, prefix="/api/screener", tags=["screener"])
 app.include_router(news.router, prefix="/api/news", tags=["news"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 
 

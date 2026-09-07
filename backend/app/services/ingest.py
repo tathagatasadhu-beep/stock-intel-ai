@@ -28,6 +28,7 @@ from app.db.orm import (
     FibonacciLevel,
     FundamentalSnapshot,
     NewsArticle,
+    PortfolioHolding,
     PriceCandle,
     ScreenerScore,
     Stock,
@@ -48,15 +49,21 @@ class IngestResult:
     news: list[NewsArticle]
 
 
-async def upsert_stock(db: AsyncSession, symbol: str, name: str, sector: str | None) -> Stock:
+async def upsert_stock(
+    db: AsyncSession, symbol: str, name: str, sector: str | None, asset_type: str = "stock", is_sp500: bool = True
+) -> Stock:
     result = await db.execute(select(Stock).where(Stock.ticker == symbol))
     stock = result.scalar_one_or_none()
     if stock is None:
-        stock = Stock(ticker=symbol, company_name=name, sector=sector, is_sp500=True)
+        stock = Stock(ticker=symbol, company_name=name, sector=sector, is_sp500=is_sp500, asset_type=asset_type)
         db.add(stock)
     else:
         stock.company_name = name
         stock.sector = sector
+        # is_sp500/asset_type intentionally NOT overwritten on existing rows — a stock
+        # already classified (e.g. by the static universe) shouldn't flip because a
+        # portfolio holding happened to reference it too; see refresh_universe.py's
+        # constituent-merging logic, which is what keeps this from being ambiguous.
     stock.last_refreshed_at = datetime.now(timezone.utc)
     await db.flush()
     return stock
@@ -232,11 +239,20 @@ async def refresh_news(db: AsyncSession, stock: Stock) -> list[NewsArticle]:
     return persisted
 
 
-async def ingest_ticker(db: AsyncSession, symbol: str, name: str, sector: str | None, as_of: date) -> IngestResult | None:
+async def ingest_ticker(
+    db: AsyncSession, symbol: str, name: str, sector: str | None, as_of: date,
+    asset_type: str = "stock", is_sp500: bool = True,
+) -> IngestResult | None:
     """Runs the full fetch+compute pipeline for one ticker. Returns None (without
     raising) if the provider had no fundamentals/candles for it — a bad ticker or a
-    provider hiccup shouldn't be indistinguishable from a crash to the caller."""
-    stock = await upsert_stock(db, symbol, name, sector)
+    provider hiccup shouldn't be indistinguishable from a crash to the caller.
+
+    ETFs (asset_type="etf") skip the valuation step — P/E-style intrinsic-value
+    methods don't meaningfully apply to a fund — but still get candles/technicals/
+    Fibonacci/news/AI-analysis, since price action and news sentiment are just as
+    relevant to a fund as a stock. See score_and_analyze_one for the scoring-side
+    equivalent (skips the composite screener score, not just valuation)."""
+    stock = await upsert_stock(db, symbol, name, sector, asset_type=asset_type, is_sp500=is_sp500)
     fundamentals = await refresh_fundamentals(db, stock, as_of)
     candles = await refresh_candles(db, stock)
     if fundamentals is None or candles is None:
@@ -244,7 +260,7 @@ async def ingest_ticker(db: AsyncSession, symbol: str, name: str, sector: str | 
 
     technicals = await compute_technicals(db, stock, candles, as_of)
     fib = await compute_fibonacci(db, stock, candles, as_of)
-    blended_valuation = await compute_valuation(db, stock, fundamentals, as_of)
+    blended_valuation = None if stock.asset_type == "etf" else await compute_valuation(db, stock, fundamentals, as_of)
     news_articles = await refresh_news(db, stock)
 
     return IngestResult(
@@ -295,42 +311,74 @@ async def build_population_from_db(db: AsyncSession, as_of: date) -> scoring.Pop
     return pop
 
 
+async def get_portfolio_ticker_symbols(db: AsyncSession) -> set[str]:
+    """All distinct tickers referenced by ANY user's portfolio holdings — used by
+    scripts/refresh_universe.py to widen the batch job's always-fresh priority tier
+    beyond CORE_TICKERS, since a user's real positions should stay fresh regardless of
+    whether they're in the static universe or one of the fixed core tickers."""
+    result = await db.execute(select(Stock.ticker).join(PortfolioHolding, PortfolioHolding.stock_id == Stock.id).distinct())
+    return {r[0] for r in result.all()}
+
+
+async def get_non_universe_portfolio_stocks(db: AsyncSession, universe_symbols: set[str]) -> list[Stock]:
+    """Stocks referenced by a portfolio holding whose ticker ISN'T in the static S&P 500
+    universe (services/sp500_universe.py) — ETFs, or a stock outside the curated list.
+    These need their own constituent-dict entries in the batch job's priority tier since
+    the static-universe pass will never reach them otherwise. Their name/sector/asset_type
+    were already set when the holding was created (see routers/portfolio.py), so no
+    provider call is needed just to enumerate them."""
+    holding_stock_ids = select(PortfolioHolding.stock_id).distinct()
+    result = await db.execute(select(Stock).where(Stock.id.in_(holding_stock_ids)))
+    return [s for s in result.scalars().all() if s.ticker not in universe_symbols]
+
+
 async def score_and_analyze_one(db: AsyncSession, result: IngestResult, pop: scoring.Population, as_of: date) -> None:
     """The scoring + AI-analysis half of the pipeline for a single already-ingested
-    ticker — shared by both callers, same as the fetch/compute half above."""
+    ticker — shared by both callers, same as the fetch/compute half above.
+
+    ETFs skip the composite screener score entirely (not just valuation) — funds don't
+    have the fundamentals-based fields the score is built from (P/E, ROE, debt/equity
+    are all meaningless for a fund), so a composite number would be misleading rather
+    than just incomplete. They still get an AI analysis (technical/thesis framing, not
+    valuation-based) since that's useful for portfolio monitoring regardless of asset
+    type — see the `is_etf` context flag below."""
     stock, f, t, v, fib, articles = result.stock, result.fundamentals, result.technicals, result.valuation, result.fibonacci, result.news
+    is_etf = stock.asset_type == "etf"
 
-    valuation_score = scoring.compute_valuation_score(
-        f.pe_ratio, f.forward_pe, f.peg_ratio, f.price_to_book, f.ev_ebitda, v.margin_of_safety_pct if v else None, pop,
-    )
-    growth_score = scoring.compute_growth_score(f.revenue_growth_yoy, f.eps_growth, f.fcf_growth, f.roe, f.roic, pop)
-    health_score = scoring.compute_financial_health_score(f.debt_equity, f.current_ratio, f.interest_coverage, f.altman_z_score, pop)
-    technical_score = scoring.compute_technical_score(
-        t.rsi14 if t else None, t.macd_hist if t else None, t.ma_crossover_signal if t else None,
-        t.volume_breakout if t else False, t.week52_breakout if t else None, pop,
-    )
-    news_score = scoring.compute_news_sentiment_score(
-        [a.sentiment_score for a in articles if a.sentiment_score is not None],
-        [a.impact_score for a in articles if a.impact_score],
-    )
-    composite = scoring.compute_composite_score(valuation_score, growth_score, health_score, technical_score, news_score)
-    rating = scoring.rating_for_score(composite)
+    composite = None
+    rating = None
+    if not is_etf:
+        valuation_score = scoring.compute_valuation_score(
+            f.pe_ratio, f.forward_pe, f.peg_ratio, f.price_to_book, f.ev_ebitda, v.margin_of_safety_pct if v else None, pop,
+        )
+        growth_score = scoring.compute_growth_score(f.revenue_growth_yoy, f.eps_growth, f.fcf_growth, f.roe, f.roic, pop)
+        health_score = scoring.compute_financial_health_score(f.debt_equity, f.current_ratio, f.interest_coverage, f.altman_z_score, pop)
+        technical_score = scoring.compute_technical_score(
+            t.rsi14 if t else None, t.macd_hist if t else None, t.ma_crossover_signal if t else None,
+            t.volume_breakout if t else False, t.week52_breakout if t else None, pop,
+        )
+        news_score = scoring.compute_news_sentiment_score(
+            [a.sentiment_score for a in articles if a.sentiment_score is not None],
+            [a.impact_score for a in articles if a.impact_score],
+        )
+        composite = scoring.compute_composite_score(valuation_score, growth_score, health_score, technical_score, news_score)
+        rating = scoring.rating_for_score(composite)
 
-    existing_score = (
-        await db.execute(select(ScreenerScore).where(ScreenerScore.stock_id == stock.id, ScreenerScore.as_of_date == as_of))
-    ).scalar_one_or_none()
-    score_row = existing_score or ScreenerScore(stock_id=stock.id, as_of_date=as_of)
-    score_row.valuation_score = valuation_score
-    score_row.growth_score = growth_score
-    score_row.financial_health_score = health_score
-    score_row.technical_score = technical_score
-    score_row.news_sentiment_score = news_score
-    score_row.composite_score = composite
-    score_row.rating = rating
-    db.add(score_row)
+        existing_score = (
+            await db.execute(select(ScreenerScore).where(ScreenerScore.stock_id == stock.id, ScreenerScore.as_of_date == as_of))
+        ).scalar_one_or_none()
+        score_row = existing_score or ScreenerScore(stock_id=stock.id, as_of_date=as_of)
+        score_row.valuation_score = valuation_score
+        score_row.growth_score = growth_score
+        score_row.financial_health_score = health_score
+        score_row.technical_score = technical_score
+        score_row.news_sentiment_score = news_score
+        score_row.composite_score = composite
+        score_row.rating = rating
+        db.add(score_row)
 
     context = {
-        "ticker": stock.ticker, "company_name": stock.company_name, "sector": stock.sector,
+        "ticker": stock.ticker, "company_name": stock.company_name, "sector": stock.sector, "is_etf": is_etf,
         "price": f.price, "pe_ratio": f.pe_ratio, "peg_ratio": f.peg_ratio, "roe": f.roe,
         "revenue_growth_yoy": f.revenue_growth_yoy, "debt_equity": f.debt_equity, "altman_z_score": f.altman_z_score,
         "margin_of_safety_pct": v.margin_of_safety_pct if v else None,

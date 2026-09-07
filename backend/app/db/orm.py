@@ -56,6 +56,7 @@ class AppUser(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, server_default=func.now())
 
     alerts: Mapped[list["Alert"]] = relationship(back_populates="user")
+    portfolio_holdings: Mapped[list["PortfolioHolding"]] = relationship(back_populates="user")
 
 
 class Stock(Base):
@@ -68,6 +69,10 @@ class Stock(Base):
     exchange: Mapped[str | None] = mapped_column(String, nullable=True)
     market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_sp500: Mapped[bool] = mapped_column(Boolean, default=True)
+    # "stock" | "etf" — added for portfolio holdings, which can include tickers outside
+    # the S&P 500 screener universe entirely (is_sp500=False) and specifically ETFs,
+    # which don't get fundamentals-based valuation/scoring (see services/ingest.py).
+    asset_type: Mapped[str] = mapped_column(String, default="stock")
     last_refreshed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, server_default=func.now())
 
@@ -312,3 +317,48 @@ class Alert(Base):
 
     user: Mapped["AppUser"] = relationship(back_populates="alerts")
     stock: Mapped["Stock"] = relationship()
+
+
+class PortfolioHolding(Base):
+    """A user's actual position in a stock or ETF — quantity + cost basis, so the app can
+    show real unrealized P&L and base exit/risk flags on the user's own entry price, not
+    just generic technical signals. `stock_id` may point at a Stock outside the S&P 500
+    screener universe entirely (is_sp500=False) — added on the fly when a holding is
+    created for a ticker we don't already track (see routers/portfolio.py)."""
+
+    __tablename__ = "portfolio_holdings"
+    __table_args__ = (UniqueConstraint("user_id", "stock_id", name="uq_portfolio_user_stock"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"))
+    stock_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("stocks.id", ondelete="CASCADE"))
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    cost_basis_per_share: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, server_default=func.now())
+
+    user: Mapped["AppUser"] = relationship(back_populates="portfolio_holdings")
+    stock: Mapped["Stock"] = relationship()
+
+
+class PortfolioFlag(Base):
+    """A monitoring flag raised for one holding by scripts/refresh_universe.py's
+    portfolio-monitoring pass (see services/portfolio_monitor.py) — exit suggestions,
+    risk warnings, and news-driven upside/downside flags. Persisted (not just emailed)
+    so the portfolio page can show flag history, and so the daily job doesn't re-email
+    the same flag every day it's still true (see the uniqueness constraint)."""
+
+    __tablename__ = "portfolio_flags"
+    __table_args__ = (UniqueConstraint("holding_id", "flag_type", "as_of_date", name="uq_portfolio_flag_per_day"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    holding_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("portfolio_holdings.id", ondelete="CASCADE"))
+    as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
+    flag_type: Mapped[str] = mapped_column(String, nullable=False)
+    # stop_loss_hit | target_reached | overbought_trim | oversold_watch | death_cross_risk
+    # | golden_cross_positive | negative_news_risk | positive_news_upside
+    # | large_unrealized_loss | large_unrealized_gain | sector_concentration
+    severity: Mapped[str] = mapped_column(String, nullable=False)  # info | warning | critical
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, server_default=func.now())
+
+    holding: Mapped["PortfolioHolding"] = relationship()

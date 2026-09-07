@@ -248,3 +248,44 @@ class AlertOut(BaseModel):
     is_active: bool
     last_triggered_at: datetime | None
     created_at: datetime
+
+
+class PortfolioHoldingCreate(BaseModel):
+    ticker: str
+    asset_type: str = Field(default="stock", pattern="^(stock|etf)$")
+    quantity: float = Field(gt=0)
+    cost_basis_per_share: float = Field(gt=0)
+
+
+class PortfolioFlagOut(BaseModel):
+    flag_type: str
+    severity: str
+    message: str
+    as_of_date: date
+    created_at: datetime
+
+
+class PortfolioHoldingOut(BaseModel):
+    id: str
+    ticker: str
+    company_name: str
+    sector: str | None
+    asset_type: str
+    quantity: float
+    cost_basis_per_share: float
+    current_price: float | None
+    market_value: float | None
+    unrealized_pnl: float | None
+    unrealized_pnl_pct: float | None
+    composite_score: float | None
+    rating: str | None
+    flags: list[PortfolioFlagOut]
+    created_at: datetime
+
+
+class PortfolioSummaryOut(BaseModel):
+    total_cost_basis: float
+    total_market_value: float | None
+    total_unrealized_pnl: float | None
+    total_unrealized_pnl_pct: float | None
+    holdings: list[PortfolioHoldingOut]

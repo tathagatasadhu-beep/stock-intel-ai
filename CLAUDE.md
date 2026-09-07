@@ -248,3 +248,44 @@ Note: viewing the screener page itself never spends API quota — it only reads 
 (`app/routers/screener.py`). All the quota cost is in `scripts/refresh_universe.py` (batch) and the
 on-demand refresh route; a smaller screener `limit` doesn't save quota by itself, it just matches the UI
 to what's realistically kept fresh.
+
+## Portfolio tracking (2026-09-08)
+
+Real stock/ETF positions with quantity + cost basis (`PortfolioHolding`), auth-gated the same way as Alerts
+(`routers/portfolio.py`, `get_or_create_app_user`). `GET/POST /api/portfolio`, `POST /api/portfolio/holdings`,
+`DELETE /api/portfolio/holdings/{id}` — frontend at `/portfolio` (`PortfolioManager.tsx`).
+
+Design decisions (all owner-approved when scoping this feature):
+- **Quantity + cost basis, not a bare watchlist** — enables real unrealized P&L and lets exit/risk flags
+  reason about the user's actual entry price, not just generic technical signals.
+- **ETFs get simplified treatment**: candles/technicals/Fibonacci/news/AI-analysis, but no valuation engine
+  or composite screener score — P/E-style methods don't apply to a fund (`Stock.asset_type`, checked in
+  `services/ingest.py::ingest_ticker` and `score_and_analyze_one`). An ETF holding still shows up in the
+  portfolio, just without a rating/score badge.
+- **Auto-monitored, no alert setup needed** — adding a holding is enough. `scripts/refresh_universe.py`
+  evaluates every refreshed holding for flags after each day's ingestion (`services/portfolio_monitor.py`)
+  and emails one digest per user for whatever's newly flagged (`email_alerts.py::send_portfolio_digest_email`).
+  Flag rules: stop-loss hit, price target reached, overbought+large-gain (trim suggestion), oversold watch,
+  golden/death cross, negative/positive high-impact news cluster, large unrealized loss/gain, and a
+  portfolio-level sector-concentration check (>40% of value in one sector) — all heuristic signals built on
+  data already shown elsewhere (AI analysis's stop-loss/targets, technicals, news sentiment), framed in the
+  UI as flags to review, not commands. One `PortfolioFlag` row per (holding, flag_type, day) so a condition
+  that's still true tomorrow doesn't re-flag/re-email every day.
+- **Portfolio holdings join the priority tier**: `scripts/refresh_universe.py`'s priority tier is
+  `CORE_TICKERS ∪ every distinct ticker any user holds` (`services/ingest.py::get_portfolio_ticker_symbols`,
+  `get_non_universe_portfolio_stocks` for tickers outside the static universe entirely — ETFs, or a stock
+  outside the curated ~467). A held position gets the same always-fresh guarantee as the fixed core set.
+- **Adding a holding triggers an immediate best-effort ingestion** (same pipeline as the on-demand refresh
+  route) so it shows real data right away instead of waiting for the next batch run — a provider hiccup
+  there doesn't block the holding from being created, it just shows null price/P&L until the next refresh.
+
+**Schema-migration gotcha this feature exposed**: `Stock.asset_type` is a new column on the already-live
+`stocks` table, and `Base.metadata.create_all` (used everywhere schema gets set up) only creates missing
+*tables*, never missing *columns* on a table that already existed. Previously only `scripts/refresh_universe.py`
+ran `create_all`, so a change like this would only get picked up once a day when the cron job ran — meaning
+the *web service* would 500 on nearly every request (any query touching `Stock`) for however long between
+its own deploy and the cron job's next run. Fixed by extracting a shared `ensure_schema()` helper
+(`app/db/migrate.py`, self-healing — the `ALTER TABLE ADD COLUMN` is expected to fail with "already exists"
+on every run after the first, caught and ignored) that now runs on **both** the web service's FastAPI
+startup event and the batch job's `main()`, so schema safety no longer depends on deploy order between the
+two services. Worth remembering for the next column added to an existing table.

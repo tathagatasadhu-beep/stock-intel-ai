@@ -35,7 +35,11 @@ class AIAnalysisResult:
 
 _SYSTEM_PROMPT = """You are a professional equity research assistant. Given structured \
 fundamental, technical, valuation, and news-sentiment data for one stock, produce a plain-English \
-analysis. Respond ONLY with a JSON object matching this exact schema:
+analysis. If the input's "is_etf" field is true, this is a fund, not a company — its \
+fundamental fields (pe_ratio, roe, debt_equity, etc.) will be null or not meaningful, so base \
+investment_thesis on the fund's sector/theme exposure and price trend instead of company-style \
+valuation, and never claim a P/E-based over/undervaluation for it. Respond ONLY with a JSON \
+object matching this exact schema:
 {
   "bullish_bearish_score": <int 0-100, 0=extremely bearish, 100=extremely bullish>,
   "risk_score": <int 0-100, 0=very low risk, 100=very high risk>,
@@ -118,12 +122,16 @@ def _fallback_analysis(context: dict) -> AIAnalysisResult:
         risk += -10 if context["altman_z_score"] > 3 else 10
     risk = int(max(0, min(100, risk)))
 
-    mos_phrase = f"trading {abs(mos):.0f}% {'below' if mos and mos > 0 else 'above'} estimated intrinsic value" if mos is not None else "intrinsic value could not be estimated from available data"
-    investment_thesis = (
-        f"{context.get('company_name', context.get('ticker', 'This stock'))} is {mos_phrase}. "
-        f"Revenue growth is {'positive' if (context.get('revenue_growth_yoy') or 0) > 0 else 'negative'} "
-        f"and return on equity is {context.get('roe', 'unavailable')}."
-    )
+    name = context.get('company_name', context.get('ticker', 'This stock'))
+    if context.get("is_etf"):
+        investment_thesis = f"{name} is a fund — company-style valuation (P/E, ROE) doesn't apply; see the technical thesis for price-trend context instead."
+    else:
+        mos_phrase = f"trading {abs(mos):.0f}% {'below' if mos and mos > 0 else 'above'} estimated intrinsic value" if mos is not None else "intrinsic value could not be estimated from available data"
+        investment_thesis = (
+            f"{name} is {mos_phrase}. "
+            f"Revenue growth is {'positive' if (context.get('revenue_growth_yoy') or 0) > 0 else 'negative'} "
+            f"and return on equity is {context.get('roe', 'unavailable')}."
+        )
     macd_phrase = "MACD has turned bullish" if (macd_hist or 0) > 0 else "MACD is bearish"
     rsi_phrase = f"RSI is {rsi:.0f}" if rsi is not None else "RSI is unavailable"
     fib_phrase = f", with a potential support zone near {support:.2f}" if support else ""

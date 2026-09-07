@@ -37,23 +37,35 @@ from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
-from app.db.orm import Alert, AppUser, FibonacciLevel, FundamentalSnapshot, Stock, TechnicalSnapshot  # noqa: E402
+from app.db.migrate import ensure_schema  # noqa: E402
+from app.db.orm import (  # noqa: E402
+    AIAnalysis,
+    Alert,
+    AppUser,
+    FibonacciLevel,
+    FundamentalSnapshot,
+    PortfolioHolding,
+    Stock,
+    TechnicalSnapshot,
+)
 from app.db.session import SessionLocal, engine  # noqa: E402
-from app.services import email_alerts, ingest, market_data, scoring  # noqa: E402
+from app.services import email_alerts, ingest, market_data, portfolio_monitor, scoring  # noqa: E402
 from app.services.sp500_universe import CORE_TICKERS  # noqa: E402
 
 CONCURRENCY = 5
 TODAY = date.today()
 
 
-async def process_ticker(symbol: str, name: str, sector: str | None, sem: asyncio.Semaphore) -> ingest.IngestResult | None:
+async def process_ticker(
+    symbol: str, name: str, sector: str | None, sem: asyncio.Semaphore, asset_type: str = "stock", is_sp500: bool = True,
+) -> ingest.IngestResult | None:
     # Each concurrent ticker gets its OWN AsyncSession — SQLAlchemy's AsyncSession is not
     # safe to share across concurrently-running coroutines/tasks. The semaphore bounds how
     # many of these run (and therefore how many provider requests fire) at once; the
     # session itself is still one-per-task.
     async with sem, SessionLocal() as db:
         try:
-            result = await ingest.ingest_ticker(db, symbol, name, sector, TODAY)
+            result = await ingest.ingest_ticker(db, symbol, name, sector, TODAY, asset_type=asset_type, is_sp500=is_sp500)
             await db.commit()
             return result
         except Exception as exc:  # noqa: BLE001 - one bad ticker shouldn't kill the whole run
@@ -157,48 +169,137 @@ async def _evaluate_alert(db: AsyncSession, alert: Alert, stock: Stock) -> tuple
 
 
 async def main():
-    async with engine.begin() as conn:
-        from app.db.orm import Base
-
-        await conn.run_sync(Base.metadata.create_all)
+    # Same schema-repair helper the web service runs on its own startup (app/main.py) —
+    # see app/db/migrate.py for why both need to run it independently.
+    await ensure_schema(engine)
 
     constituents = await market_data.get_sp500_constituents()
     print(f"[refresh_universe] {len(constituents)} S&P 500 constituents")
 
-    # Core tickers (services/sp500_universe.py::CORE_TICKERS) are processed as their own
-    # sequential-then-awaited batch, fully completing before the broader universe pass
-    # even starts — this guarantees they get first claim on today's FMP quota rather
-    # than just a statistical edge from list order under concurrency. See that list's
-    # comment for why: a small always-fresh set the screener can rely on, instead of
-    # thinly spreading quota across all ~467 tickers so most are stale most of the time.
-    core_symbols = set(CORE_TICKERS)
-    core_constituents = [c for c in constituents if c["symbol"] in core_symbols]
-    rest_constituents = [c for c in constituents if c["symbol"] not in core_symbols]
+    async with SessionLocal() as db:
+        portfolio_symbols = await ingest.get_portfolio_ticker_symbols(db)
+        universe_symbols = {c["symbol"] for c in constituents}
+        non_universe_portfolio_stocks = await ingest.get_non_universe_portfolio_stocks(db, universe_symbols)
+
+    # Priority tier = CORE_TICKERS (services/sp500_universe.py) UNION every distinct
+    # ticker any user actually holds in their portfolio (services/ingest.py ->
+    # get_portfolio_ticker_symbols) — processed as its own sequential-then-awaited batch,
+    # fully completing before the broader universe pass even starts. This guarantees them
+    # first claim on today's FMP quota rather than just a statistical edge from list order
+    # under concurrency. Real positions get the same always-fresh guarantee as the fixed
+    # core set (see CLAUDE.md -> "Portfolio holdings join the priority tier").
+    priority_symbols = set(CORE_TICKERS) | portfolio_symbols
+    priority_constituents = [
+        {"symbol": c["symbol"], "name": c["name"], "sector": c["sector"], "asset_type": "stock", "is_sp500": True}
+        for c in constituents
+        if c["symbol"] in priority_symbols
+    ]
+    # Portfolio tickers outside the static universe entirely (ETFs, or a stock outside
+    # the curated ~467) — their name/sector/asset_type were already set when the holding
+    # was created (routers/portfolio.py), so no extra provider call is needed to list them.
+    priority_constituents += [
+        {"symbol": s.ticker, "name": s.company_name, "sector": s.sector, "asset_type": s.asset_type, "is_sp500": False}
+        for s in non_universe_portfolio_stocks
+    ]
+
+    rest_constituents = [
+        {"symbol": c["symbol"], "name": c["name"], "sector": c["sector"], "asset_type": "stock", "is_sp500": True}
+        for c in constituents
+        if c["symbol"] not in priority_symbols
+    ]
 
     # Rotate the starting point of the REST of the universe daily so any quota left over
-    # after the core set makes cumulative progress across the long tail instead of always
-    # succeeding on the same tickers at the front of the list. Deterministic on the date,
-    # so re-running this script twice in one day (e.g. a manual retry) hits the same
-    # order rather than shuffling randomly.
+    # after the priority tier makes cumulative progress across the long tail instead of
+    # always succeeding on the same tickers at the front of the list. Deterministic on
+    # the date, so re-running this script twice in one day (e.g. a manual retry) hits the
+    # same order rather than shuffling randomly.
     offset = date.today().toordinal() % len(rest_constituents)
     rest_constituents = rest_constituents[offset:] + rest_constituents[:offset]
-    print(f"[refresh_universe] {len(core_constituents)} core tickers first, then long-tail offset {offset} ({rest_constituents[0]['symbol']})")
+    print(f"[refresh_universe] {len(priority_constituents)} priority tickers (core + portfolio) first, then long-tail offset {offset} ({rest_constituents[0]['symbol']})")
 
     sem = asyncio.Semaphore(CONCURRENCY)
-    core_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem) for c in core_constituents]
-    core_results = [r for r in await asyncio.gather(*core_tasks) if r]
-    print(f"[refresh_universe] core set: {len(core_results)}/{len(core_constituents)} refreshed")
+    priority_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem, c["asset_type"], c["is_sp500"]) for c in priority_constituents]
+    priority_results = [r for r in await asyncio.gather(*priority_tasks) if r]
+    print(f"[refresh_universe] priority tier: {len(priority_results)}/{len(priority_constituents)} refreshed")
 
-    rest_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem) for c in rest_constituents]
+    rest_tasks = [process_ticker(c["symbol"], c["name"], c["sector"], sem, c["asset_type"], c["is_sp500"]) for c in rest_constituents]
     rest_results = [r for r in await asyncio.gather(*rest_tasks) if r]
 
-    results = core_results + rest_results
+    results = priority_results + rest_results
     print(f"[refresh_universe] fundamentals/technicals computed for {len(results)} tickers total")
+    refreshed_stock_ids = {r.stock.id for r in results}
     async with SessionLocal() as db:
         await score_and_analyze(db, results)
         await check_and_send_alerts(db)
+        await monitor_portfolios(db, refreshed_stock_ids)
 
     print("[refresh_universe] done")
+
+
+async def monitor_portfolios(db: AsyncSession, refreshed_stock_ids: set) -> None:
+    """Evaluates flags for every holding whose stock was refreshed in this run, plus a
+    portfolio-level sector-concentration check across each user's full holdings (not
+    just today's refreshed subset — concentration doesn't care whether a position's
+    price is from today or a few days ago). Emails one digest per user for whatever's
+    newly flagged today. See services/portfolio_monitor.py for the flag rules."""
+    user_ids = {r[0] for r in (await db.execute(select(PortfolioHolding.user_id).distinct())).all()}
+
+    for user_id in user_ids:
+        holdings = (await db.execute(select(PortfolioHolding).where(PortfolioHolding.user_id == user_id))).scalars().all()
+        if not holdings:
+            continue
+
+        holdings_with_values: list[tuple[PortfolioHolding, Stock, float]] = []
+        new_flags_for_email: list[tuple[str, str, str]] = []  # (ticker, severity, message)
+
+        for holding in holdings:
+            stock = (await db.execute(select(Stock).where(Stock.id == holding.stock_id))).scalar_one_or_none()
+            if stock is None:
+                continue
+            fundamentals = (
+                await db.execute(select(FundamentalSnapshot).where(FundamentalSnapshot.stock_id == stock.id).order_by(FundamentalSnapshot.as_of_date.desc()).limit(1))
+            ).scalar_one_or_none()
+            if fundamentals is None:
+                continue
+            holdings_with_values.append((holding, stock, fundamentals.price * holding.quantity))
+
+            if stock.id not in refreshed_stock_ids:
+                continue  # stale price — don't re-evaluate technical/news flags off old data
+
+            technicals = (
+                await db.execute(select(TechnicalSnapshot).where(TechnicalSnapshot.stock_id == stock.id).order_by(TechnicalSnapshot.as_of_date.desc()).limit(1))
+            ).scalar_one_or_none()
+            ai_analysis = (
+                await db.execute(select(AIAnalysis).where(AIAnalysis.stock_id == stock.id).order_by(AIAnalysis.generated_at.desc()).limit(1))
+            ).scalar_one_or_none()
+            recent_news = await portfolio_monitor.get_recent_news(db, stock.id, TODAY)
+
+            candidates = portfolio_monitor.evaluate_holding(holding, stock, fundamentals.price, technicals, ai_analysis, recent_news)
+            new_rows = await portfolio_monitor.persist_flags_if_new(db, holding.id, TODAY, candidates)
+            for row in new_rows:
+                new_flags_for_email.append((stock.ticker, row.severity, row.message))
+
+        concentration = portfolio_monitor.evaluate_sector_concentration([(s, v) for _, s, v in holdings_with_values])
+        if concentration:
+            sector, flag = concentration
+            # Attach to the largest holding in the over-concentrated sector — PortfolioFlag
+            # rows need a holding_id, and this is the most intuitive one to show it on.
+            sector_matches = [(h, s, v) for h, s, v in holdings_with_values if s.sector == sector]
+            if sector_matches:
+                largest_holding, largest_stock, _ = max(sector_matches, key=lambda row: row[2])
+                new_rows = await portfolio_monitor.persist_flags_if_new(db, largest_holding.id, TODAY, [flag])
+                for row in new_rows:
+                    new_flags_for_email.append((largest_stock.ticker, row.severity, row.message))
+
+        await db.commit()
+
+        if new_flags_for_email and settings.smtp_host:
+            user = (await db.execute(select(AppUser).where(AppUser.id == user_id))).scalar_one_or_none()
+            if user:
+                try:
+                    email_alerts.send_portfolio_digest_email(user.email, new_flags_for_email)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[refresh_universe] failed to email portfolio digest to {user.email}: {exc}")
 
 
 if __name__ == "__main__":

@@ -197,3 +197,37 @@ export type ScreenerRow = {
   composite_score: number;
   rating: string;
 };
+
+export type PortfolioFlagOut = {
+  flag_type: string;
+  severity: "info" | "warning" | "critical";
+  message: string;
+  as_of_date: string;
+  created_at: string;
+};
+
+export type PortfolioHoldingOut = {
+  id: string;
+  ticker: string;
+  company_name: string;
+  sector: string | null;
+  asset_type: "stock" | "etf";
+  quantity: number;
+  cost_basis_per_share: number;
+  current_price: number | null;
+  market_value: number | null;
+  unrealized_pnl: number | null;
+  unrealized_pnl_pct: number | null;
+  composite_score: number | null;
+  rating: string | null;
+  flags: PortfolioFlagOut[];
+  created_at: string;
+};
+
+export type PortfolioSummaryOut = {
+  total_cost_basis: number;
+  total_market_value: number | null;
+  total_unrealized_pnl: number | null;
+  total_unrealized_pnl_pct: number | null;
+  holdings: PortfolioHoldingOut[];
+};

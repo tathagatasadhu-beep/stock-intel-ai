@@ -32,9 +32,9 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{DB_PATH.as_posix()}"  # re-a
 import numpy as np  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
+from app.db.migrate import ensure_schema  # noqa: E402
 from app.db.orm import (  # noqa: E402
     AIAnalysis,
-    Base,
     FibonacciLevel,
     FundamentalSnapshot,
     NewsArticle,
@@ -89,8 +89,7 @@ def _generate_candles(start_price: float, annual_drift: float, annual_vol: float
 
 
 async def seed_if_empty():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await ensure_schema(engine)
 
     async with SessionLocal() as db:
         existing = (await db.execute(select(Stock))).scalars().first()

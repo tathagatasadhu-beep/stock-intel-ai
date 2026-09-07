@@ -30,6 +30,9 @@ export function TopNav() {
           <Link href="/" className="hover:text-text">
             Screener
           </Link>
+          <Link href="/portfolio" className="hover:text-text">
+            Portfolio
+          </Link>
           <Link href="/alerts" className="hover:text-text">
             Alerts
           </Link>
