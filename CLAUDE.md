@@ -256,10 +256,24 @@ non-priority tickers every run — confirmed live: a same-day on-demand refresh 
 member!) 429'd anyway, meaning the batch job itself had already burned the full day's FMP quota on the
 long tail before the user ever clicked "Fetch now." `scripts/refresh_universe.py::MAX_LONG_TAIL_PER_RUN`
 (150) now caps how many long-tail tickers one run will attempt, applied *after* the daily rotation offset
-so cumulative multi-day progress through the universe is unaffected — this leaves real same-day headroom
-for on-demand fetches instead of relying on FMP's own 429s as the only backstop. Tune the constant if the
-actual FMP plan's daily cap turns out to be different from the ~250 estimate (check the FMP dashboard's
-API usage page for the real number).
+so cumulative multi-day progress through the universe is unaffected. Superseded in practice by the next
+section below, but left in place as a defensive cap on whatever candle provider is active.
+
+## Candles moved off FMP to Yahoo (2026-09-07)
+
+The cap above turned out not to be enough — confirmed live via a full batch run where 429s hit tickers
+scattered throughout the long tail (PNC, USB, TFC, AIG, MET, and more), not just ones near the end,
+meaning the account's real daily FMP budget is lower than the ~250 estimate this project had been tuning
+against. Rather than keep guessing at the right cap, `services/market_data.py::get_historical_candles` now
+tries Yahoo Finance's unofficial `/v8/finance/chart/{ticker}` endpoint first — free, keyless, no daily cap
+(the same endpoint the popular `yfinance` library scrapes at far higher volume than this app needs). Needs
+a browser-like `User-Agent` header (`_YAHOO_HEADERS`) or Yahoo blocks the request. FMP stays wired up as a
+fallback only for a symbol Yahoo has no data for, so `FMP_API_KEY` is still required, just barely used.
+
+Verified live against the real endpoint (not mocked) for WMT, AAPL, SPY (ETF), and BRK-B (share-class
+ticker with a dash) — all four returned full 400-day history straight from Yahoo with zero FMP calls. A
+deliberately fake ticker correctly fell through to the FMP fallback (and got FMP's still-exhausted 429,
+confirming the fallback path itself works even though FMP's quota is empty).
 
 ## Portfolio tracking (2026-09-08)
 

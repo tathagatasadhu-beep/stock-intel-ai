@@ -1,21 +1,28 @@
 """
 Market data: fundamentals/ratios/quote from Finnhub, historical price candles from
-Financial Modeling Prep's `/stable` API. Split across two providers deliberately (see
-CLAUDE.md -> "Finnhub fundamentals migration", added 2026-09-07):
+Yahoo Finance's unofficial chart endpoint (with FMP as a fallback). Split across
+providers deliberately (see CLAUDE.md -> "Finnhub fundamentals migration", added
+2026-09-07, and "Candles moved off FMP to Yahoo", added 2026-09-07):
 
-- FMP's free tier caps out around 250 requests/day total. The original design called it
-  9 times per ticker (quote/profile/ratios/key-metrics/financial-growth/financial-scores/
-  balance-sheet-statement/income-statement/historical-candles), so the ~467-ticker
-  universe took ~19 days of quota to fully cover, and any real-world usage — including
-  the on-demand refresh route — competed with the daily batch job for the same tiny
-  budget and regularly hit "Limit Reach" (confirmed live).
+- FMP's free tier caps out well below what a daily ~467-ticker universe refresh needs —
+  even after cutting FMP down to 1 call/ticker (candles only, see below), a full pass
+  still 429'd across tickers scattered throughout the run, confirmed live in production
+  even for CORE_TICKERS members that get first claim on quota. Capping how many tickers
+  the batch attempts per run (`scripts/refresh_universe.py::MAX_LONG_TAIL_PER_RUN`)
+  didn't fix it either — the account's real daily budget is evidently lower than FMP's
+  advertised free-tier figure. Rather than keep guessing at the right cap, candles moved
+  to a provider with no daily cap at all.
 - Finnhub's free tier (already have a key, used for news) has no comparable daily cap —
   just a per-minute rate limit — and its `/stock/metric?metric=all` endpoint covers
   nearly everything FMP's fundamentals did (confirmed live, field-by-field). The one
   thing Finnhub's free tier explicitly does NOT allow is historical OHLCV candles
-  (`/stock/candle` → 403 "You don't have access to this resource", confirmed live) — so
-  FMP is kept for exactly that one call per ticker instead of nine. At 1 call/ticker,
-  the full universe fits in a single day's FMP quota with room to spare.
+  (`/stock/candle` → 403 "You don't have access to this resource", confirmed live).
+- Historical candles now come from Yahoo Finance's unofficial `/v8/finance/chart/{ticker}`
+  endpoint instead — no API key, no signup, no documented daily cap (it's the same
+  endpoint the popular `yfinance` library scrapes at much higher volume than this app
+  needs). Needs a browser-like `User-Agent` header or Yahoo blocks the request; confirmed
+  live against AAPL/WMT before building this. FMP stays wired up as a fallback for the
+  rare case Yahoo has no data for a symbol, so `FMP_API_KEY` is still a required env var.
 
 Two known accuracy trade-offs from this split, both intentional:
 - `altman_z_score` is always None now — Finnhub's free tier doesn't expose it, and
@@ -36,7 +43,7 @@ provider response degrades the app to "some fields missing" instead of an ingest
 failure.
 """
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import asyncio
 
@@ -54,6 +61,12 @@ def _fmp_client() -> httpx.AsyncClient:
     if not settings.fmp_api_key:
         raise MarketDataError("FMP_API_KEY is not configured.")
     return httpx.AsyncClient(base_url=settings.fmp_base_url, timeout=30.0)
+
+
+# Yahoo blocks requests with no (or a non-browser) User-Agent — confirmed live.
+_YAHOO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+}
 
 
 def _finnhub_client() -> httpx.AsyncClient:
@@ -177,9 +190,60 @@ async def get_fundamentals(ticker: str) -> FundamentalsData | None:
     )
 
 
+async def _fetch_yahoo_candles(ticker: str, days: int) -> list[dict]:
+    """[{date, open, high, low, close, volume}] ascending by date, or [] on any failure
+    (bad symbol, blocked request, malformed response) so get_historical_candles can fall
+    back to FMP instead of raising — see module docstring for why Yahoo is tried first."""
+    async with httpx.AsyncClient(timeout=15.0, headers=_YAHOO_HEADERS) as client:
+        try:
+            resp = await client.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+                params={"range": "2y", "interval": "1d"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+
+    result = ((data.get("chart") or {}).get("result")) or []
+    if not result:
+        return []
+    r = result[0]
+    timestamps = r.get("timestamp") or []
+    quote = ((r.get("indicators") or {}).get("quote") or [{}])[0]
+    opens, highs, lows, closes, volumes = (
+        quote.get("open") or [],
+        quote.get("high") or [],
+        quote.get("low") or [],
+        quote.get("close") or [],
+        quote.get("volume") or [],
+    )
+
+    rows = []
+    for i, ts in enumerate(timestamps):
+        if i >= len(opens) or opens[i] is None or highs[i] is None or lows[i] is None or closes[i] is None:
+            continue  # Yahoo nulls out halted/no-trade sessions rather than omitting them
+        rows.append(
+            {
+                "date": datetime.fromtimestamp(ts, tz=timezone.utc).date(),
+                "open": opens[i],
+                "high": highs[i],
+                "low": lows[i],
+                "close": closes[i],
+                "volume": volumes[i] if i < len(volumes) and volumes[i] is not None else 0,
+            }
+        )
+    return rows[-days:]
+
+
 async def get_historical_candles(ticker: str, days: int = 400) -> list[dict]:
-    """Returns [{date, open, high, low, close, volume}] ascending by date. Stays on FMP —
-    Finnhub's free tier doesn't allow historical candles (see module docstring)."""
+    """Returns [{date, open, high, low, close, volume}] ascending by date. Yahoo first
+    (free, keyless, no daily cap), FMP only as a fallback if Yahoo has no data for the
+    symbol — see module docstring."""
+    yahoo_rows = await _fetch_yahoo_candles(ticker, days)
+    if yahoo_rows:
+        return yahoo_rows
+
     to_date = date.today()
     from_date = to_date - timedelta(days=int(days * 1.6))  # padding for weekends/holidays
     async with _fmp_client() as client:
